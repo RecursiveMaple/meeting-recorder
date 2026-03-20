@@ -49,6 +49,8 @@ let activeInputStream = null;
 let activeDisplayStream = null;
 const DESKTOP_AUDIO_VALUE = '__desktop__';
 const SUMMARY_DRAFT_STORAGE_KEY = 'summaryConfigDraft';
+let noDesktopAudioWarningTimer = null;
+let desktopAudioSignalDetected = false;
 
 function loadSummaryDraft() {
   try {
@@ -84,6 +86,23 @@ function clearSummaryDraft() {
   } catch (error) {
     console.warn('Failed to clear summary draft:', error);
   }
+}
+
+function resetDesktopAudioWarning() {
+  desktopAudioSignalDetected = false;
+  if (noDesktopAudioWarningTimer) {
+    clearTimeout(noDesktopAudioWarningTimer);
+    noDesktopAudioWarningTimer = null;
+  }
+}
+
+function scheduleDesktopAudioWarning() {
+  resetDesktopAudioWarning();
+  noDesktopAudioWarningTimer = setTimeout(() => {
+    if (isRecording && selectedMicrophoneId === DESKTOP_AUDIO_VALUE && !desktopAudioSignalDetected) {
+      statusText.textContent = '暂未检测到桌面音频输入。请确认：1）浏览器共享弹窗中已勾选“共享音频”；2）视频/系统声音实际在播放；3）如果用了 Virtual Cable，播放器输出和浏览器采集的设备路由一致；4）部分浏览器在扬声器静音或错误输出设备下可能采不到系统音频。';
+    }
+  }, 4000);
 }
 
 // Auto-detect WebSocket URL from current page
@@ -645,6 +664,20 @@ function drawWaveform() {
   const dataArray = new Uint8Array(bufferLength);
   analyser.getByteTimeDomainData(dataArray);
 
+  if (selectedMicrophoneId === DESKTOP_AUDIO_VALUE && !desktopAudioSignalDetected) {
+    let peakDelta = 0;
+    for (let i = 0; i < bufferLength; i++) {
+      peakDelta = Math.max(peakDelta, Math.abs(dataArray[i] - 128));
+    }
+    if (peakDelta > 6) {
+      desktopAudioSignalDetected = true;
+      if (noDesktopAudioWarningTimer) {
+        clearTimeout(noDesktopAudioWarningTimer);
+        noDesktopAudioWarningTimer = null;
+      }
+    }
+  }
+
   waveCtx.clearRect(
     0,
     0,
@@ -689,6 +722,12 @@ async function startRecording() {
     }
 
     const stream = await getSelectedAudioStream();
+
+    if (selectedMicrophoneId === DESKTOP_AUDIO_VALUE) {
+      scheduleDesktopAudioWarning();
+    } else {
+      resetDesktopAudioWarning();
+    }
 
     audioContext = new (window.AudioContext || window.webkitAudioContext)();
     analyser = audioContext.createAnalyser();
@@ -820,6 +859,8 @@ async function stopRecording() {
     activeDisplayStream.getTracks().forEach((track) => track.stop());
     activeDisplayStream = null;
   }
+
+  resetDesktopAudioWarning();
 
   if (analyser) {
     analyser = null;
