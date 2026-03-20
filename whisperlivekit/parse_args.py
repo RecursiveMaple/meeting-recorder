@@ -15,6 +15,83 @@ def _flatten_config(config: dict, parent_key: str = "", sep: str = "_") -> dict:
     return items
 
 
+def _normalize_config_keys(config: dict) -> dict:
+    """Map flattened YAML keys to argparse destination names."""
+    aliases = {
+        # server
+        "server_host": "host",
+        "server_port": "port",
+        "server_ssl_certfile": "ssl_certfile",
+        "server_ssl_keyfile": "ssl_keyfile",
+        "server_forwarded_allow_ips": "forwarded_allow_ips",
+        # transcription
+        "transcription_backend": "backend",
+        "transcription_model_size": "model_size",
+        "transcription_lan": "lan",
+        "transcription_model_cache_dir": "model_cache_dir",
+        "transcription_model_dir": "model_dir",
+        "transcription_model_path": "model_path",
+        "transcription_lora_path": "lora_path",
+        "transcription_warmup_file": "warmup_file",
+        "transcription_min_chunk_size": "min_chunk_size",
+        "transcription_direct_english_translation": "direct_english_translation",
+        # backend policy
+        "backend_policy_policy": "backend_policy",
+        "backend_policy_buffer_trimming": "buffer_trimming",
+        "backend_policy_buffer_trimming_sec": "buffer_trimming_sec",
+        "backend_policy_confidence_validation": "confidence_validation",
+        # simulstreaming
+        "simulstreaming_disable_fast_encoder": "disable_fast_encoder",
+        "simulstreaming_custom_alignment_heads": "custom_alignment_heads",
+        "simulstreaming_frame_threshold": "frame_threshold",
+        "simulstreaming_beams": "beams",
+        "simulstreaming_decoder_type": "decoder_type",
+        "simulstreaming_audio_max_len": "audio_max_len",
+        "simulstreaming_audio_min_len": "audio_min_len",
+        "simulstreaming_cif_ckpt_path": "cif_ckpt_path",
+        "simulstreaming_never_fire": "never_fire",
+        "simulstreaming_init_prompt": "init_prompt",
+        "simulstreaming_static_init_prompt": "static_init_prompt",
+        "simulstreaming_max_context_tokens": "max_context_tokens",
+        # diarization
+        "diarization_enabled": "diarization",
+        "diarization_backend": "diarization_backend",
+        "diarization_punctuation_split": "punctuation_split",
+        "diarization_segmentation_model": "segmentation_model",
+        "diarization_embedding_model": "embedding_model",
+        # voice activity
+        "voice_activity_vac": "vac",
+        "voice_activity_vac_chunk_size": "vac_chunk_size",
+        "voice_activity_vad": "vad",
+        # translation
+        "translation_target_language": "target_language",
+        "translation_nllb_backend": "nllb_backend",
+        "translation_nllb_size": "nllb_size",
+        # vllm
+        "vllm_url": "vllm_url",
+        "vllm_model": "vllm_model",
+        # llm summary
+        "llm_summary_enabled": "llm_summary_enabled",
+        "llm_summary_api_url": "llm_api_url",
+        "llm_summary_api_key": "llm_api_key",
+        "llm_summary_model": "llm_model",
+        "llm_summary_timeout": "llm_timeout",
+        "llm_summary_max_tokens": "llm_max_tokens",
+        "llm_summary_temperature": "llm_temperature",
+        "llm_summary_summary_template": "summary_template",
+        "llm_summary_summary_min_tokens": "summary_min_tokens",
+        # logging/input
+        "logging_log_level": "log_level",
+        "input_pcm_input": "pcm_input",
+        "input_transcription": "transcription",
+    }
+
+    normalized = {}
+    for key, value in config.items():
+        normalized[aliases.get(key, key)] = value
+    return normalized
+
+
 def _load_config_file(config_path: Optional[str]) -> dict:
     """Load configuration from YAML file.
 
@@ -47,7 +124,7 @@ def _load_config_file(config_path: Optional[str]) -> dict:
             config = yaml.safe_load(f)
         if config is None:
             return {}
-        return _flatten_config(config)
+        return _normalize_config_keys(_flatten_config(config))
     except ImportError:
         print("Warning: PyYAML is not installed. Config file will be ignored.")
         print("Install it with: pip install pyyaml")
@@ -535,13 +612,14 @@ Configuration file:
         "confidence_validation": "confidence_validation",
         "no_transcription": "no_transcription",
         "disable_punctuation_split": "disable_punctuation_split",
-        "no_vac": "no_vac",
-        "no_vad": "no_vad",
+        "vac": "vac",
+        "vad": "vad",
         "pcm_input": "pcm_input",
         "disable_fast_encoder": "disable_fast_encoder",
         "never_fire": "never_fire",
         "direct_english_translation": "direct_english_translation",
         "llm_summary_enabled": "llm_summary_enabled",
+        "transcription": "transcription",
     }
 
     # For boolean flags in config, convert to argparse format
@@ -549,7 +627,14 @@ Configuration file:
         if config_key in config:
             val = config[config_key]
             if isinstance(val, bool):
-                setattr(args, arg_attr, val)
+                if arg_attr == "vac":
+                    args.no_vac = not val
+                elif arg_attr == "vad":
+                    args.no_vad = not val
+                elif arg_attr == "transcription":
+                    args.no_transcription = not val
+                else:
+                    setattr(args, arg_attr, val)
 
     args.transcription = not args.no_transcription
     args.vad = not args.no_vad
