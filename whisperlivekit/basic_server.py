@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from whisperlivekit import AudioProcessor, TranscriptionEngine, get_inline_ui_html, parse_args
+from whisperlivekit.session_store import session_store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logging.getLogger().setLevel(logging.WARNING)
@@ -18,11 +19,13 @@ logging.getLogger("whisperlivekit.qwen3_asr").setLevel(logging.DEBUG)
 config = parse_args()
 transcription_engine = None
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global transcription_engine
     transcription_engine = TranscriptionEngine(config=config)
     yield
+
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(
@@ -32,6 +35,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 @app.get("/")
 async def get():
@@ -43,11 +47,13 @@ async def health():
     """Health check endpoint."""
     global transcription_engine
     backend = getattr(transcription_engine.config, "backend", "whisper") if transcription_engine else None
-    return JSONResponse({
-        "status": "ok",
-        "backend": backend,
-        "ready": transcription_engine is not None,
-    })
+    return JSONResponse(
+        {
+            "status": "ok",
+            "backend": backend,
+            "ready": transcription_engine is not None,
+        }
+    )
 
 
 async def handle_websocket_results(websocket, results_generator, diff_tracker=None):
@@ -75,23 +81,36 @@ async def websocket_endpoint(websocket: WebSocket):
     session_language = websocket.query_params.get("language", None)
     mode = websocket.query_params.get("mode", "full")
 
+    # Create a session for this WebSocket connection
+    summary_template = getattr(config, "summary_template", "meeting_minutes") if config else "meeting_minutes"
+    session_id = session_store.create_session(summary_template=summary_template)
+
     audio_processor = AudioProcessor(
         transcription_engine=transcription_engine,
         language=session_language,
+        session_id=session_id,
     )
+
+    # Register the processor for retry functionality
+    session_store.register_processor(session_id, audio_processor)
+
     await websocket.accept()
     logger.info(
-        "WebSocket connection opened.%s",
+        "WebSocket connection opened.%s session_id=%s",
         f" language={session_language}" if session_language else "",
+        session_id,
     )
     diff_tracker = None
     if mode == "diff":
         from whisperlivekit.diff_protocol import DiffTracker
+
         diff_tracker = DiffTracker()
         logger.info("Client requested diff mode")
 
     try:
-        await websocket.send_json({"type": "config", "useAudioWorklet": bool(config.pcm_input), "mode": mode})
+        await websocket.send_json(
+            {"type": "config", "useAudioWorklet": bool(config.pcm_input), "mode": mode, "session_id": session_id}
+        )
     except Exception as e:
         logger.warning(f"Failed to send config to client: {e}")
 
@@ -103,7 +122,7 @@ async def websocket_endpoint(websocket: WebSocket):
             message = await websocket.receive_bytes()
             await audio_processor.process_audio(message)
     except KeyError as e:
-        if 'bytes' in str(e):
+        if "bytes" in str(e):
             logger.warning("Client has closed the connection.")
         else:
             logger.error(f"Unexpected KeyError in websocket_endpoint: {e}", exc_info=True)
@@ -123,6 +142,7 @@ async def websocket_endpoint(websocket: WebSocket):
             logger.warning(f"Exception while awaiting websocket_task completion: {e}")
 
         await audio_processor.cleanup()
+        session_store.unregister_processor(session_id)
         logger.info("WebSocket endpoint cleaned up successfully.")
 
 
@@ -130,11 +150,13 @@ async def websocket_endpoint(websocket: WebSocket):
 # Deepgram-compatible WebSocket API  (/v1/listen)
 # ---------------------------------------------------------------------------
 
+
 @app.websocket("/v1/listen")
 async def deepgram_websocket_endpoint(websocket: WebSocket):
     """Deepgram-compatible live transcription WebSocket."""
     global transcription_engine
     from whisperlivekit.deepgram_compat import handle_deepgram_websocket
+
     await handle_deepgram_websocket(websocket, transcription_engine, config)
 
 
@@ -142,13 +164,23 @@ async def deepgram_websocket_endpoint(websocket: WebSocket):
 # OpenAI-compatible REST API  (/v1/audio/transcriptions)
 # ---------------------------------------------------------------------------
 
+
 async def _convert_to_pcm(audio_bytes: bytes) -> bytes:
     """Convert any audio format to PCM s16le mono 16kHz using ffmpeg."""
     proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-i", "pipe:0",
-        "-f", "s16le", "-acodec", "pcm_s16le",
-        "-ar", "16000", "-ac", "1",
-        "-loglevel", "error",
+        "ffmpeg",
+        "-i",
+        "pipe:0",
+        "-f",
+        "s16le",
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        "-loglevel",
+        "error",
         "pipe:1",
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
@@ -157,6 +189,7 @@ async def _convert_to_pcm(audio_bytes: bytes) -> bytes:
     stdout, stderr = await proc.communicate(input=audio_bytes)
     if proc.returncode != 0:
         from fastapi import HTTPException
+
         raise HTTPException(status_code=400, detail=f"Audio conversion failed: {stderr.decode().strip()}")
     return stdout
 
@@ -191,22 +224,26 @@ def _format_openai_response(front_data, response_format: str, language: Optional
             continue
         start = _parse_time_str(line.get("start", "0:00:00"))
         end = _parse_time_str(line.get("end", "0:00:00"))
-        segments.append({
-            "id": len(segments),
-            "start": round(start, 2),
-            "end": round(end, 2),
-            "text": line["text"],
-        })
+        segments.append(
+            {
+                "id": len(segments),
+                "start": round(start, 2),
+                "end": round(end, 2),
+                "text": line["text"],
+            }
+        )
         # Split segment text into approximate words with estimated timestamps
         seg_words = line["text"].split()
         if seg_words:
             word_duration = (end - start) / max(len(seg_words), 1)
             for j, word in enumerate(seg_words):
-                words.append({
-                    "word": word,
-                    "start": round(start + j * word_duration, 2),
-                    "end": round(start + (j + 1) * word_duration, 2),
-                })
+                words.append(
+                    {
+                        "word": word,
+                        "start": round(start + j * word_duration, 2),
+                        "end": round(start + (j + 1) * word_duration, 2),
+                    }
+                )
 
     if response_format == "verbose_json":
         return {
@@ -265,6 +302,7 @@ async def create_transcription(
     audio_bytes = await file.read()
     if not audio_bytes:
         from fastapi import HTTPException
+
         raise HTTPException(status_code=400, detail="Empty audio file")
 
     # Convert to PCM for pipeline processing
@@ -294,7 +332,7 @@ async def create_transcription(
     # Feed audio in chunks (1 second each)
     chunk_size = 16000 * 2  # 1 second of PCM
     for i in range(0, len(pcm_data), chunk_size):
-        await processor.process_audio(pcm_data[i:i + chunk_size])
+        await processor.process_audio(pcm_data[i : i + chunk_size])
 
     # Signal end of audio
     await processor.process_audio(b"")
@@ -323,14 +361,121 @@ async def list_models():
     global transcription_engine
     backend = getattr(transcription_engine.config, "backend", "whisper") if transcription_engine else "whisper"
     model_size = getattr(transcription_engine.config, "model_size", "base") if transcription_engine else "base"
-    return JSONResponse({
-        "object": "list",
-        "data": [{
-            "id": f"{backend}/{model_size}" if backend != "whisper" else f"whisper-{model_size}",
-            "object": "model",
-            "owned_by": "whisperlivekit",
-        }],
-    })
+    return JSONResponse(
+        {
+            "object": "list",
+            "data": [
+                {
+                    "id": f"{backend}/{model_size}" if backend != "whisper" else f"whisper-{model_size}",
+                    "object": "model",
+                    "owned_by": "whisperlivekit",
+                }
+            ],
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# JSONL Export API  (/v1/export/jsonl)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/v1/export/jsonl")
+async def export_jsonl(session_id: Optional[str] = None):
+    """Export transcription data as JSONL format.
+
+    Each line is a JSON object:
+    - Session metadata: {"type": "session", ...}
+    - Segment: {"type": "segment", ...}
+    - Summary: {"type": "summary", ...}
+
+    Args:
+        session_id: Optional session ID to export. If not provided, exports all sessions.
+
+    Returns:
+        Plain text response with JSONL content.
+    """
+    jsonl_content = session_store.to_jsonl(session_id)
+    return PlainTextResponse(jsonl_content, media_type="application/x-ndjson")
+
+
+@app.get("/v1/sessions")
+async def list_sessions():
+    """List all active sessions."""
+    sessions = session_store.get_all_sessions()
+    return JSONResponse(
+        {
+            "sessions": [s.to_dict() for s in sessions],
+            "count": len(sessions),
+        }
+    )
+
+
+@app.get("/v1/sessions/{session_id}")
+async def get_session(session_id: str):
+    """Get details of a specific session."""
+    session = session_store.get_session(session_id)
+    if not session:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    segments = session_store.get_session_segments(session_id)
+    return JSONResponse(
+        {
+            "session": session.to_dict(),
+            "segments": [s.to_dict() for s in segments],
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# Summary Retry API  (/v1/summary/retry)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/v1/summary/retry")
+async def retry_summary(session_id: str, segment_id: int):
+    """Retry summary generation for a specific segment.
+
+    Args:
+        session_id: The session ID.
+        segment_id: The segment ID to retry.
+
+    Returns:
+        JSON response with the new summary status.
+    """
+    from fastapi import HTTPException
+
+    # Get the segment
+    segment = session_store.get_segment(session_id, segment_id)
+    if not segment:
+        raise HTTPException(status_code=404, detail=f"Segment {segment_id} not found in session {session_id}")
+
+    if not segment.text:
+        raise HTTPException(status_code=400, detail="Segment has no text to summarize")
+
+    # Get the processor for this session
+    processor = session_store.get_processor(session_id)
+    if not processor:
+        raise HTTPException(status_code=404, detail=f"No active processor for session {session_id}")
+
+    # Check if LLM is enabled
+    if not processor.llm_client or not processor.summary_queue:
+        raise HTTPException(status_code=400, detail="Summary generation is not enabled for this session")
+
+    # Reset status and queue for retry
+    session_store.update_segment_summary(session_id, segment_id, status="pending")
+
+    # Queue for retry
+    await processor.summary_queue.put((segment_id, segment.text))
+
+    return JSONResponse(
+        {
+            "status": "queued",
+            "session_id": session_id,
+            "segment_id": segment_id,
+        }
+    )
 
 
 def main():
@@ -366,6 +511,7 @@ def main():
         uvicorn_kwargs = {**uvicorn_kwargs, "forwarded_allow_ips": config.forwarded_allow_ips}
 
     uvicorn.run(**uvicorn_kwargs)
+
 
 if __name__ == "__main__":
     main()

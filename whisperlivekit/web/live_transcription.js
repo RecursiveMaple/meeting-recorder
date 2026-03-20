@@ -31,6 +31,7 @@ let configReadyResolve;
 const configReady = new Promise((r) => (configReadyResolve = r));
 let outputAudioContext = null;
 let audioSource = null;
+let currentSessionId = null;  // Store session ID for retry functionality
 
 waveCanvas.width = 60 * (window.devicePixelRatio || 1);
 waveCanvas.height = 30 * (window.devicePixelRatio || 1);
@@ -266,6 +267,9 @@ function setupWebSocket() {
       const data = JSON.parse(event.data);
       if (data.type === "config") {
         serverUseAudioWorklet = !!data.useAudioWorklet;
+        if (data.session_id) {
+          currentSessionId = data.session_id;
+        }
         statusText.textContent = serverUseAudioWorklet
           ? "Connected. Using AudioWorklet (PCM)."
           : "Connected. Using MediaRecorder (WebM).";
@@ -481,6 +485,55 @@ function renderLinesWithBuffer(
     .join("");
 
   linesTranscriptDiv.innerHTML = linesHtml;
+  
+  // Add event delegation for retry buttons
+  linesTranscriptDiv.querySelectorAll('.retry-summary-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      
+      const segmentId = btn.dataset.segmentId;
+      if (!segmentId || !currentSessionId) {
+        console.error('Missing segment_id or session_id for retry');
+        return;
+      }
+      
+      // Update button to show retrying state
+      btn.disabled = true;
+      btn.textContent = 'Retrying...';
+      
+      try {
+        const response = await fetch('/v1/summary/retry', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            session_id: currentSessionId,
+            segment_id: parseInt(segmentId, 10),
+          }),
+        });
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        const result = await response.json();
+        console.log('Retry queued:', result);
+        
+        // Update button to show queued state
+        btn.textContent = 'Queued';
+        
+        // The summary will be updated via WebSocket when ready
+      } catch (error) {
+        console.error('Failed to retry summary:', error);
+        btn.disabled = false;
+        btn.textContent = 'Retry';
+        alert('Failed to retry summary. Please try again.');
+      }
+    });
+  });
+  
   const transcriptContainer = document.querySelector('.transcript-container');
   if (transcriptContainer) {
     transcriptContainer.scrollTo({ top: transcriptContainer.scrollHeight, behavior: "smooth" });

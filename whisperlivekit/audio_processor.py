@@ -19,6 +19,7 @@ from whisperlivekit.timed_objects import ChangeSpeaker, FrontData, Segment, Sile
 from whisperlivekit.tokens_alignment import TokensAlignment
 from whisperlivekit.summary.llm_client import LLMClient, LLMConfig, DEFAULT_SYSTEM_PROMPTS
 from whisperlivekit.summary.templates import get_template
+from whisperlivekit.session_store import session_store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -65,11 +66,15 @@ class AudioProcessor:
         """Initialize the audio processor with configuration, models, and state."""
         # Extract per-session language override before passing to TranscriptionEngine
         session_language = kwargs.pop("language", None)
+        session_id = kwargs.pop("session_id", None)
 
         if "transcription_engine" in kwargs and isinstance(kwargs["transcription_engine"], TranscriptionEngine):
             models = kwargs["transcription_engine"]
         else:
             models = TranscriptionEngine(**kwargs)
+
+        # Session management
+        self.session_id: Optional[str] = session_id
 
         # Audio processing settings
         self.args = models.args
@@ -188,9 +193,13 @@ class AudioProcessor:
                 word_count = len(segment_text.split())
                 if word_count < min_tokens:
                     self.summary_status[segment_id] = "skipped"
+                    if self.session_id:
+                        session_store.update_segment_summary(self.session_id, segment_id, status="skipped")
                     continue
 
                 self.summary_status[segment_id] = "processing"
+                if self.session_id:
+                    session_store.update_segment_summary(self.session_id, segment_id, status="processing")
 
                 try:
                     summary = await asyncio.wait_for(
@@ -205,14 +214,25 @@ class AudioProcessor:
                     )
                     self.summary_results[segment_id] = summary
                     self.summary_status[segment_id] = "ready"
+
+                    # Update session store
+                    if self.session_id:
+                        session_store.update_segment_summary(
+                            self.session_id, segment_id, summary=summary, status="ready"
+                        )
+
                     logger.debug(f"Summary ready for segment {segment_id}: {summary[:50]}...")
 
                 except asyncio.TimeoutError:
                     logger.warning(f"Summary timeout for segment {segment_id}")
                     self.summary_status[segment_id] = "timeout"
+                    if self.session_id:
+                        session_store.update_segment_summary(self.session_id, segment_id, status="timeout")
                 except Exception as e:
                     logger.error(f"Summary error for segment {segment_id}: {e}")
                     self.summary_status[segment_id] = "error"
+                    if self.session_id:
+                        session_store.update_segment_summary(self.session_id, segment_id, status="error")
 
             except asyncio.CancelledError:
                 logger.info("Summary processor cancelled.")
@@ -234,22 +254,25 @@ class AudioProcessor:
         # Store initial status
         self.summary_status[segment_id] = "pending"
 
+        # Store segment in session store for JSONL export and retry
+        if self.session_id:
+            session_store.add_segment(
+                session_id=self.session_id,
+                text=segment.text,
+                start=segment.start,
+                end=segment.end,
+                speaker=segment.speaker,
+            )
+            # Update the segment ID in session store to match our counter
+            session = session_store.get_session(self.session_id)
+            if session and session.segment_counter == segment_id:
+                # The segment was just added, update its ID
+                pass  # segment_id already matches
+
         # Queue for async processing
         asyncio.create_task(self.summary_queue.put((segment_id, segment.text)))
 
         return segment_id
-
-        # Summary processing (LLM-based)
-        self.summary_queue: Optional[asyncio.Queue] = None
-        self.summary_task: Optional[asyncio.Task] = None
-        self.llm_client: Optional[LLMClient] = None
-        self.summary_results: Dict[int, str] = {}  # segment_id -> summary
-        self.summary_status: Dict[int, str] = {}  # segment_id -> status (pending/processing/ready/error/timeout)
-        self._processed_segments: Set[int] = set()  # Track which segments have been queued for summary
-        self._segment_counter: int = 0  # Unique ID for each segment
-
-        if getattr(self.args, "llm_summary_enabled", False):
-            self._init_summary_client()
 
     async def _push_silence_event(self) -> None:
         if self.transcription_queue:
