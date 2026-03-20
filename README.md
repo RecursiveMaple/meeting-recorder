@@ -48,6 +48,53 @@ wlk serve --diarization --llm-summary-enabled --llm-api-url http://localhost:114
 
 ## 配置选项
 
+### 配置文件方式
+
+支持使用 YAML 配置文件管理所有配置项。配置优先级：**命令行参数 > 配置文件 > 默认值**
+
+```bash
+# 使用默认配置文件 (config.yaml)
+wlk serve
+
+# 使用自定义配置文件
+wlk serve --config /path/to/config.yaml
+
+# 命令行参数会覆盖配置文件中的值
+wlk serve --config config.yaml --port 9000
+```
+
+配置文件示例 (`config.yaml`)：
+
+```yaml
+# 服务器设置
+server:
+  host: "localhost"
+  port: 8000
+
+# 转录设置
+transcription:
+  backend: "faster-whisper"
+  model_size: "base"
+  lan: "auto"
+
+# 说话人分离
+diarization:
+  enabled: true
+  backend: "sortformer"
+
+# LLM 总结
+llm_summary:
+  enabled: true
+  api_url: "http://localhost:11434/v1"
+  model: "llama3.2"
+```
+
+默认配置文件位置（按优先级）：
+1. `./config.yaml` 或 `./config.yml`（当前目录）
+2. `~/.config/wlk/config.yaml`（用户配置目录）
+
+### 命令行参数
+
 ### LLM 总结配置
 
 | 参数 | 说明 | 默认值 |

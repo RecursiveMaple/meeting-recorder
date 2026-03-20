@@ -1,0 +1,97 @@
+# WhisperLiveKit Configuration File
+# =================================
+# This is the default configuration file for WhisperLiveKit.
+# Configuration priority: CLI arguments > config file > defaults
+#
+# Usage:
+#   wlk serve --config config.yaml
+#   wlk serve --config /path/to/custom-config.yaml
+
+# Server settings
+server:
+  host: "localhost"          # The host address to bind the server to
+  port: 8000                 # The port number to bind the server to
+  ssl_certfile: null         # Path to the SSL certificate file
+  ssl_keyfile: null          # Path to the SSL private key file
+  forwarded_allow_ips: null  # Allowed IPs for reverse proxying
+
+# Transcription settings
+transcription:
+  backend: "auto"            # ASR backend: auto, mlx-whisper, faster-whisper, whisper, openai-api, voxtral, voxtral-mlx, qwen3, qwen3-mlx, qwen3-mlx-simul, qwen3-simul, vllm-realtime
+  model_size: "base"         # Model size: tiny, tiny.en, base, base.en, small, small.en, medium, medium.en, large-v1, large-v2, large-v3, large, large-v3-turbo
+  lan: "auto"                # Source language code (e.g., en, de, zh) or "auto" for detection
+  model_cache_dir: null      # Override default model cache directory
+  model_dir: null            # Directory containing Whisper model files (overrides --model)
+  model_path: null           # Direct path to SimulStreaming Whisper .pt model file
+  lora_path: null            # Path or HuggingFace repo ID for LoRA adapter weights
+  warmup_file: null          # Path to speech audio file for warmup (or empty to skip)
+  min_chunk_size: 0.1        # Minimum audio chunk size in seconds
+  direct_english_translation: false  # Use Whisper to directly translate to English
+
+# Backend policy settings
+backend_policy:
+  policy: "simulstreaming"   # Streaming policy: simulstreaming (1) or localagreement (2)
+  buffer_trimming: "segment" # Buffer trimming strategy: sentence or segment
+  buffer_trimming_sec: 15.0  # Buffer trimming length threshold in seconds
+  confidence_validation: false  # Accelerate validation using confidence scores
+
+# SimulStreaming-specific settings
+simulstreaming:
+  disable_fast_encoder: false  # Disable Faster Whisper/MLX Whisper for encoding
+  custom_alignment_heads: null # Custom alignment heads for --model-dir
+  frame_threshold: 25          # Attention-guided decoding threshold
+  beams: 1                     # Number of beams for beam search decoding
+  decoder_type: null           # Decoder type: beam or greedy
+  audio_max_len: 30.0          # Max audio buffer length in seconds
+  audio_min_len: 0.0           # Min audio buffer length to process
+  cif_ckpt_path: null          # Path to Simul-Whisper CIF model checkpoint
+  never_fire: false            # Override CIF model behavior
+  init_prompt: null            # Init prompt for the model
+  static_init_prompt: null     # Static init prompt (non-scrolling)
+  max_context_tokens: null     # Max context tokens for the model
+
+# Diarization settings
+diarization:
+  enabled: false              # Enable speaker diarization
+  backend: "sortformer"       # Diarization backend: sortformer or diart
+  punctuation_split: false    # Use punctuation for speaker boundary detection
+  segmentation_model: "pyannote/segmentation-3.0"  # Segmentation model
+  embedding_model: "pyannote/embedding"            # Embedding model
+
+# Voice Activity settings
+voice_activity:
+  vac: true                   # Enable voice activity controller
+  vac_chunk_size: 0.04        # VAC sample size in seconds
+  vad: true                   # Enable voice activity detection
+
+# Translation settings
+translation:
+  target_language: ""         # Target language for translation
+  nllb_backend: "transformers"  # NLLB backend: transformers or ctranslate2
+  nllb_size: "600M"           # NLLB model size: 600M or 1.3B
+
+# vLLM Realtime backend settings
+vllm:
+  url: "ws://localhost:8000/v1/realtime"  # vLLM realtime WebSocket endpoint
+  model: ""                   # Model name for vLLM (e.g., Qwen/Qwen3-ASR-1.7B)
+
+# LLM Summary settings (for meeting recorder)
+llm_summary:
+  enabled: false              # Enable LLM-based summarization
+  api_url: "http://localhost:11434/v1"  # LLM API URL (Ollama, OpenAI, etc.)
+  api_key: ""                 # API key for authentication
+  model: "llama3.2"          # Model name for summarization
+  timeout: 5.0               # Request timeout in seconds
+  max_tokens: 100            # Maximum tokens for summary
+  temperature: 0.3           # Temperature for generation
+  summary_template: "meeting_minutes"  # Summary template ID
+  summary_min_tokens: 5      # Minimum tokens before summarizing
+
+# Logging settings
+logging:
+  log_level: "DEBUG"         # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+# Input settings
+input:
+  pcm_input: false           # Expect raw PCM input (bypass FFmpeg)
+  transcription: true        # Enable transcription

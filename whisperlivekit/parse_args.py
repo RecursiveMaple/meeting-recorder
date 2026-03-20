@@ -1,18 +1,109 @@
-
+import os
 from argparse import ArgumentParser
+from typing import Any, Optional
+
+
+def _flatten_config(config: dict, parent_key: str = "", sep: str = "_") -> dict:
+    """Flatten nested config dict into flat dict with underscore-separated keys."""
+    items = {}
+    for k, v in config.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.update(_flatten_config(v, new_key, sep=sep))
+        else:
+            items[new_key] = v
+    return items
+
+
+def _load_config_file(config_path: Optional[str]) -> dict:
+    """Load configuration from YAML file.
+
+    Args:
+        config_path: Path to config file. If None, looks for default locations.
+
+    Returns:
+        Flattened config dict with CLI-compatible keys.
+    """
+    if config_path is None:
+        # Look for default config locations
+        default_paths = [
+            "config.yaml",
+            "config.yml",
+            os.path.expanduser("~/.config/wlk/config.yaml"),
+            os.path.expanduser("~/.config/wlk/config.yml"),
+        ]
+        for path in default_paths:
+            if os.path.isfile(path):
+                config_path = path
+                break
+
+    if config_path is None or not os.path.isfile(config_path):
+        return {}
+
+    try:
+        import yaml
+
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f)
+        if config is None:
+            return {}
+        return _flatten_config(config)
+    except ImportError:
+        print("Warning: PyYAML is not installed. Config file will be ignored.")
+        print("Install it with: pip install pyyaml")
+        return {}
+    except Exception as e:
+        print(f"Warning: Failed to load config file '{config_path}': {e}")
+        return {}
+
+
+def _apply_config_defaults(parser: ArgumentParser, config: dict) -> ArgumentParser:
+    """Apply config values as defaults for arguments not specified on CLI.
+
+    This modifies the parser's defaults in-place.
+    """
+    for action in parser._actions:
+        if action.dest in config:
+            # Only set default if it's not the help action
+            if action.dest != "help":
+                action.default = config[action.dest]
+    return parser
 
 
 def parse_args():
-    parser = ArgumentParser(description="Whisper FastAPI Online Server")
+    parser = ArgumentParser(
+        description="Whisper FastAPI Online Server",
+        epilog="""
+Configuration file:
+  Use --config to specify a YAML configuration file.
+  Priority: CLI arguments > config file > built-in defaults
+  
+  Example config.yaml:
+    server:
+      host: "0.0.0.0"
+      port: 8080
+    transcription:
+      backend: "faster-whisper"
+      model_size: "large-v3"
+        """,
+    )
+
+    # Config file argument (processed first)
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to YAML configuration file. CLI arguments override config file values.",
+    )
+
+    # Server arguments
     parser.add_argument(
         "--host",
         type=str,
         default="localhost",
         help="The host address to bind the server to.",
     )
-    parser.add_argument(
-        "--port", type=int, default=8000, help="The port number to bind the server to."
-    )
+    parser.add_argument("--port", type=int, default=8000, help="The port number to bind the server to.")
     parser.add_argument(
         "--warmup-file",
         type=str,
@@ -90,7 +181,7 @@ def parse_args():
         "--model",
         type=str,
         default="base",
-        dest='model_size',
+        dest="model_size",
         help="Name size of the Whisper model to use (default: tiny). Suggested values: tiny.en,tiny,base.en,base,small.en,small,medium.en,medium,large-v1,large-v2,large-v3,large,large-v3-turbo. The model is automatically downloaded from the model hub if not present in model cache dir.",
     )
 
@@ -118,7 +209,7 @@ def parse_args():
         "--language",
         type=str,
         default="auto",
-        dest='lan',
+        dest="lan",
         help="Source language code, e.g. en,de,cs, or 'auto' for language detection.",
     )
     parser.add_argument(
@@ -147,7 +238,20 @@ def parse_args():
         "--backend",
         type=str,
         default="auto",
-        choices=["auto", "mlx-whisper", "faster-whisper", "whisper", "openai-api", "voxtral", "voxtral-mlx", "qwen3", "qwen3-mlx", "qwen3-mlx-simul", "qwen3-simul", "vllm-realtime"],
+        choices=[
+            "auto",
+            "mlx-whisper",
+            "faster-whisper",
+            "whisper",
+            "openai-api",
+            "voxtral",
+            "voxtral-mlx",
+            "qwen3",
+            "qwen3-mlx",
+            "qwen3-mlx-simul",
+            "qwen3-simul",
+            "vllm-realtime",
+        ],
         help="Select the ASR backend implementation. Use 'qwen3-mlx-simul' for Qwen3-ASR SimulStreaming on Apple Silicon (MLX). Use 'qwen3-mlx' for Qwen3-ASR LocalAgreement on MLX. Use 'qwen3-simul' for Qwen3-ASR SimulStreaming (PyTorch). Use 'vllm-realtime' for vLLM Realtime WebSocket.",
     )
     parser.add_argument(
@@ -156,9 +260,7 @@ def parse_args():
         default=False,
         help="Disable VAC = voice activity controller.",
     )
-    parser.add_argument(
-        "--vac-chunk-size", type=float, default=0.04, help="VAC sample size in seconds."
-    )
+    parser.add_argument("--vac-chunk-size", type=float, default=0.04, help="VAC sample size in seconds.")
 
     parser.add_argument(
         "--no-vad",
@@ -194,7 +296,7 @@ def parse_args():
         "--pcm-input",
         action="store_true",
         default=False,
-        help="If set, raw PCM (s16le) data is expected as input and FFmpeg will be bypassed. Frontend will use AudioWorklet instead of MediaRecorder."
+        help="If set, raw PCM (s16le) data is expected as input and FFmpeg will be bypassed. Frontend will use AudioWorklet instead of MediaRecorder.",
     )
     # vLLM Realtime backend arguments
     parser.add_argument(
@@ -213,7 +315,9 @@ def parse_args():
     )
 
     # SimulStreaming-specific arguments
-    simulstreaming_group = parser.add_argument_group('SimulStreaming arguments (only used with --backend simulstreaming)')
+    simulstreaming_group = parser.add_argument_group(
+        "SimulStreaming arguments (only used with --backend simulstreaming)"
+    )
 
     simulstreaming_group.add_argument(
         "--disable-fast-encoder",
@@ -333,13 +437,127 @@ def parse_args():
         help="600M or 1.3B",
     )
 
+    # LLM Summary arguments (for meeting recorder)
+    llm_group = parser.add_argument_group("LLM Summary arguments (for meeting recorder)")
+
+    llm_group.add_argument(
+        "--llm-summary-enabled",
+        action="store_true",
+        default=False,
+        dest="llm_summary_enabled",
+        help="Enable LLM-based summarization for meeting recorder.",
+    )
+
+    llm_group.add_argument(
+        "--llm-api-url",
+        type=str,
+        default="http://localhost:11434/v1",
+        dest="llm_api_url",
+        help="LLM API URL (Ollama, OpenAI, DeepSeek, etc.).",
+    )
+
+    llm_group.add_argument(
+        "--llm-api-key",
+        type=str,
+        default="",
+        dest="llm_api_key",
+        help="API key for LLM authentication.",
+    )
+
+    llm_group.add_argument(
+        "--llm-model",
+        type=str,
+        default="llama3.2",
+        dest="llm_model",
+        help="Model name for summarization.",
+    )
+
+    llm_group.add_argument(
+        "--llm-timeout",
+        type=float,
+        default=5.0,
+        dest="llm_timeout",
+        help="Request timeout in seconds.",
+    )
+
+    llm_group.add_argument(
+        "--llm-max-tokens",
+        type=int,
+        default=100,
+        dest="llm_max_tokens",
+        help="Maximum tokens for summary.",
+    )
+
+    llm_group.add_argument(
+        "--llm-temperature",
+        type=float,
+        default=0.3,
+        dest="llm_temperature",
+        help="Temperature for generation.",
+    )
+
+    llm_group.add_argument(
+        "--summary-template",
+        type=str,
+        default="meeting_minutes",
+        dest="summary_template",
+        help="Summary template ID (meeting_minutes, interview, general).",
+    )
+
+    llm_group.add_argument(
+        "--summary-min-tokens",
+        type=int,
+        default=5,
+        dest="summary_min_tokens",
+        help="Minimum tokens before summarizing.",
+    )
+
+    # Parse known args first to get --config
+    args, unknown = parser.parse_known_args()
+
+    # Load config file
+    config_path = args.config
+    config = _load_config_file(config_path)
+
+    # Apply config defaults to parser
+    if config:
+        _apply_config_defaults(parser, config)
+
+    # Parse all args again with config defaults applied
     args = parser.parse_args()
+
+    # Handle boolean flags from config
+    # Config file may have "enabled: true" but argparse expects --flag
+    # We need to map config boolean keys to argparse flag names
+    bool_flags = {
+        "diarization": "diarization",
+        "punctuation_split": "punctuation_split",
+        "confidence_validation": "confidence_validation",
+        "no_transcription": "no_transcription",
+        "disable_punctuation_split": "disable_punctuation_split",
+        "no_vac": "no_vac",
+        "no_vad": "no_vad",
+        "pcm_input": "pcm_input",
+        "disable_fast_encoder": "disable_fast_encoder",
+        "never_fire": "never_fire",
+        "direct_english_translation": "direct_english_translation",
+        "llm_summary_enabled": "llm_summary_enabled",
+    }
+
+    # For boolean flags in config, convert to argparse format
+    for config_key, arg_attr in bool_flags.items():
+        if config_key in config:
+            val = config[config_key]
+            if isinstance(val, bool):
+                setattr(args, arg_attr, val)
+
     args.transcription = not args.no_transcription
     args.vad = not args.no_vad
     args.vac = not args.no_vac
-    delattr(args, 'no_transcription')
-    delattr(args, 'no_vad')
-    delattr(args, 'no_vac')
+    delattr(args, "no_transcription")
+    delattr(args, "no_vad")
+    delattr(args, "no_vac")
 
     from whisperlivekit.config import WhisperLiveKitConfig
+
     return WhisperLiveKitConfig.from_namespace(args)
