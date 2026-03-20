@@ -47,6 +47,43 @@ body {
   flex-direction: column;
 }
 
+.config-panel {
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 14px 16px;
+  background: var(--bg);
+}
+
+.config-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+.field-wide {
+  grid-column: 1 / -1;
+}
+
+.config-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.secondary-button {
+  border: 1px solid var(--button-border);
+  background: var(--button-bg);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 10px 14px;
+  cursor: pointer;
+}
+
+.secondary-button:hover {
+  background: var(--chip-bg);
+}
+
 /* Record button */
 #recordButton {
   width: 50px;
@@ -172,7 +209,12 @@ body {
   gap: 3px;
 }
 
-#microphoneSelect {
+#microphoneSelect,
+#languageSelect,
+#templateSelect,
+#apiUrlInput,
+#apiKeyInput,
+#modelInput {
   font-size: 16px;
   padding: 5px 8px;
   border-radius: 8px;
@@ -183,6 +225,28 @@ body {
   width: 100%;
   max-width: 190px;
   min-width: 120px;
+}
+
+#templateSelect,
+#languageSelect,
+#apiUrlInput,
+#apiKeyInput,
+#modelInput {
+  width: 100%;
+  max-width: none;
+}
+
+textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 84px;
+  font-size: 16px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background-color: var(--button-bg);
+  color: var(--text);
+  box-sizing: border-box;
 }
 
 #microphoneSelect:focus {
@@ -347,6 +411,10 @@ label {
 
 /* for smaller screens */
 @media (max-width: 480px) {
+  .config-grid {
+    grid-template-columns: 1fr;
+  }
+
   .header-container {
     padding: 15px;
   }

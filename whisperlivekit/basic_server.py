@@ -1,14 +1,15 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import List, Optional
+from typing import Dict, List, Optional
 
-from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from whisperlivekit import AudioProcessor, TranscriptionEngine, get_inline_ui_html, parse_args
 from whisperlivekit.session_store import session_store
+from whisperlivekit.summary.templates import get_template, list_templates
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logging.getLogger().setLevel(logging.WARNING)
@@ -18,6 +19,14 @@ logging.getLogger("whisperlivekit.qwen3_asr").setLevel(logging.DEBUG)
 
 config = parse_args()
 transcription_engine = None
+summary_runtime_config: Dict[str, str] = {
+    "template_id": getattr(config, "summary_template", "meeting_minutes"),
+    "system_prompt": getattr(config, "summary_system_prompt", "") or "",
+    "user_prompt": getattr(config, "summary_user_prompt", "") or "",
+    "api_url": getattr(config, "llm_api_url", "http://localhost:11434/v1"),
+    "api_key": getattr(config, "llm_api_key", ""),
+    "model": getattr(config, "llm_model", "llama3.2"),
+}
 
 
 @asynccontextmanager
@@ -399,6 +408,74 @@ async def export_jsonl(session_id: Optional[str] = None):
     return PlainTextResponse(jsonl_content, media_type="application/x-ndjson")
 
 
+@app.get("/v1/templates")
+async def get_templates():
+    templates = [template.to_dict() for template in list_templates()]
+    return JSONResponse({"templates": templates, "count": len(templates)})
+
+
+@app.get("/v1/summary/config")
+async def get_summary_config():
+    template_id = summary_runtime_config.get("template_id") or getattr(config, "summary_template", "meeting_minutes")
+    template = get_template(template_id) or get_template("meeting_minutes")
+    return JSONResponse(
+        {
+            "enabled": getattr(config, "llm_summary_enabled", False),
+            "template_id": template_id,
+            "system_prompt": summary_runtime_config.get("system_prompt")
+            or (template.system_prompt if template else ""),
+            "user_prompt": summary_runtime_config.get("user_prompt")
+            or (template.user_prompt if template else "{{text}}"),
+            "api_url": summary_runtime_config.get("api_url", getattr(config, "llm_api_url", "")),
+            "api_key": summary_runtime_config.get("api_key", getattr(config, "llm_api_key", "")),
+            "model": summary_runtime_config.get("model", getattr(config, "llm_model", "")),
+        }
+    )
+
+
+@app.post("/v1/summary/config")
+async def save_summary_config(payload: dict = Body(...)):
+    template_id = payload.get("template_id") or getattr(config, "summary_template", "meeting_minutes")
+    template = get_template(template_id) or get_template("meeting_minutes")
+
+    summary_runtime_config["template_id"] = template_id
+    summary_runtime_config["system_prompt"] = payload.get("system_prompt") or (
+        template.system_prompt if template else ""
+    )
+    summary_runtime_config["user_prompt"] = payload.get("user_prompt") or (
+        template.user_prompt if template else "{{text}}"
+    )
+    summary_runtime_config["api_url"] = payload.get("api_url") or getattr(
+        config, "llm_api_url", "http://localhost:11434/v1"
+    )
+    summary_runtime_config["api_key"] = payload.get("api_key") or ""
+    summary_runtime_config["model"] = payload.get("model") or getattr(config, "llm_model", "llama3.2")
+
+    config.summary_template = summary_runtime_config["template_id"]
+    config.summary_system_prompt = summary_runtime_config["system_prompt"]
+    config.summary_user_prompt = summary_runtime_config["user_prompt"]
+    config.llm_api_url = summary_runtime_config["api_url"]
+    config.llm_api_key = summary_runtime_config["api_key"]
+    config.llm_model = summary_runtime_config["model"]
+    config.llm_summary_enabled = True
+
+    for session in session_store.get_all_sessions():
+        session.summary_template = template_id
+        processor = session_store.get_processor(session.id)
+        if processor:
+            processor.args.llm_summary_enabled = True
+            processor.update_summary_runtime_config(
+                api_url=summary_runtime_config["api_url"],
+                api_key=summary_runtime_config["api_key"],
+                model=summary_runtime_config["model"],
+                template_id=summary_runtime_config["template_id"],
+                system_prompt=summary_runtime_config["system_prompt"],
+                user_prompt=summary_runtime_config["user_prompt"],
+            )
+
+    return JSONResponse({"status": "saved", **summary_runtime_config})
+
+
 @app.get("/v1/sessions")
 async def list_sessions():
     """List all active sessions."""
@@ -434,7 +511,7 @@ async def get_session(session_id: str):
 
 
 @app.post("/v1/summary/retry")
-async def retry_summary(session_id: str, segment_id: int):
+async def retry_summary(payload: dict = Body(...)):
     """Retry summary generation for a specific segment.
 
     Args:
@@ -444,7 +521,10 @@ async def retry_summary(session_id: str, segment_id: int):
     Returns:
         JSON response with the new summary status.
     """
-    from fastapi import HTTPException
+    session_id = payload.get("session_id")
+    segment_id = payload.get("segment_id")
+    if not session_id or segment_id is None:
+        raise HTTPException(status_code=400, detail="session_id and segment_id are required")
 
     # Get the segment
     segment = session_store.get_segment(session_id, segment_id)

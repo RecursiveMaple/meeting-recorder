@@ -171,13 +171,35 @@ class AudioProcessor:
         self.summary_queue = asyncio.Queue()
         logger.info(f"LLM summary client initialized: {config.api_url} / {config.model}")
 
+    def update_summary_runtime_config(
+        self,
+        api_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        template_id: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+        user_prompt: Optional[str] = None,
+    ) -> None:
+        if api_url is not None:
+            self.args.llm_api_url = api_url
+        if api_key is not None:
+            self.args.llm_api_key = api_key
+        if model is not None:
+            self.args.llm_model = model
+        if template_id is not None:
+            self.args.summary_template = template_id
+        if system_prompt is not None:
+            self.args.summary_system_prompt = system_prompt
+        if user_prompt is not None:
+            self.args.summary_user_prompt = user_prompt
+        if getattr(self.args, "llm_summary_enabled", False):
+            self._init_summary_client()
+
     async def summary_processor(self) -> None:
         """Process segments for summarization using LLM."""
         if not self.llm_client or not self.summary_queue:
             return
 
-        template_id = getattr(self.args, "summary_template", "meeting_minutes")
-        template = get_template(template_id) or get_template("meeting_minutes")
         min_tokens = getattr(self.args, "summary_min_tokens", 5)
 
         while True:
@@ -202,13 +224,21 @@ class AudioProcessor:
                     session_store.update_segment_summary(self.session_id, segment_id, status="processing")
 
                 try:
+                    template_id = getattr(self.args, "summary_template", "meeting_minutes")
+                    template = get_template(template_id) or get_template("meeting_minutes")
+                    system_prompt = getattr(self.args, "summary_system_prompt", None) or (
+                        template.system_prompt
+                        if template
+                        else DEFAULT_SYSTEM_PROMPTS.get(template_id, DEFAULT_SYSTEM_PROMPTS["general"])
+                    )
+                    user_prompt = getattr(self.args, "summary_user_prompt", None) or (
+                        template.user_prompt if template else "{{text}}"
+                    )
                     summary = await asyncio.wait_for(
                         self.llm_client.summarize(
                             text=segment_text,
-                            system_prompt=template.system_prompt
-                            if template
-                            else DEFAULT_SYSTEM_PROMPTS.get(template_id, DEFAULT_SYSTEM_PROMPTS["general"]),
-                            user_prompt_template=template.user_prompt if template else "{{text}}",
+                            system_prompt=system_prompt,
+                            user_prompt_template=user_prompt,
                         ),
                         timeout=self.llm_client.config.timeout,
                     )
@@ -256,18 +286,17 @@ class AudioProcessor:
 
         # Store segment in session store for JSONL export and retry
         if self.session_id:
-            session_store.add_segment(
+            stored_segment_id = session_store.add_segment(
                 session_id=self.session_id,
                 text=segment.text,
                 start=segment.start,
                 end=segment.end,
                 speaker=segment.speaker,
             )
-            # Update the segment ID in session store to match our counter
-            session = session_store.get_session(self.session_id)
-            if session and session.segment_counter == segment_id:
-                # The segment was just added, update its ID
-                pass  # segment_id already matches
+            if stored_segment_id > 0:
+                segment_id = stored_segment_id
+
+        segment.segment_id = segment_id
 
         # Queue for async processing
         asyncio.create_task(self.summary_queue.put((segment_id, segment.text)))
@@ -652,6 +681,7 @@ class AudioProcessor:
                             segment_id = self._queue_segment_for_summary(segment)
                             # Store segment_id in segment for later lookup
                             segment._summary_id = segment_id
+                            segment.segment_id = segment_id
                     prev_lines_count = len(lines)
 
                 # Attach summaries to segments

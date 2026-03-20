@@ -134,6 +134,7 @@ class Segment(TimedText):
     speaker: Optional[str]
     tokens: Optional[ASRToken] = None
     translation: Optional[Translation] = None
+    segment_id: Optional[int] = None
     summary: Optional[str] = None
     summary_status: str = "pending"  # pending, processing, ready, error, timeout
 
@@ -163,6 +164,7 @@ class Segment(TimedText):
     def to_dict(self) -> Dict[str, Any]:
         """Serialize the segment for frontend consumption."""
         _dict: Dict[str, Any] = {
+            "segment_id": self.segment_id,
             "speaker": int(self.speaker) if self.speaker != -1 else 1,
             "text": self.text,
             "start": format_time(self.start),

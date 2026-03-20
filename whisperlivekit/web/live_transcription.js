@@ -34,6 +34,17 @@ const recordButton = document.getElementById("recordButton");
 const linesTranscriptDiv = document.getElementById("linesTranscript");
 const timerElement = document.querySelector(".timer");
 const microphoneSelect = document.getElementById("microphoneSelect");
+const languageSelect = document.getElementById("languageSelect");
+const templateSelect = document.getElementById("templateSelect");
+const systemPromptInput = document.getElementById("systemPromptInput");
+const userPromptInput = document.getElementById("userPromptInput");
+const apiUrlInput = document.getElementById("apiUrlInput");
+const apiKeyInput = document.getElementById("apiKeyInput");
+const modelInput = document.getElementById("modelInput");
+const saveSummaryConfigButton = document.getElementById("saveSummaryConfigButton");
+const exportJsonlButton = document.getElementById("exportJsonlButton");
+let availableTemplates = [];
+let selectedLanguage = localStorage.getItem('selectedLanguage') || 'zh';
 
 // Auto-detect WebSocket URL from current page
 const host = window.location.hostname || "localhost";
@@ -115,16 +126,99 @@ function handleMicrophoneChange() {
   }
 }
 
+function handleLanguageChange() {
+  selectedLanguage = languageSelect ? languageSelect.value || 'zh' : 'zh';
+  localStorage.setItem('selectedLanguage', selectedLanguage);
+
+  if (isRecording) {
+    statusText.textContent = '切换语言中，请稍候...';
+    stopRecording().then(() => {
+      setTimeout(() => {
+        toggleRecording();
+      }, 1000);
+    });
+  }
+}
+
 // Helpers
 function fmt1(x) {
   const n = Number(x);
   return Number.isFinite(n) ? n.toFixed(1) : x;
 }
 
+async function loadTemplates() {
+  const response = await fetch('/v1/templates');
+  if (!response.ok) throw new Error(`Failed to load templates: ${response.status}`);
+  const data = await response.json();
+  availableTemplates = data.templates || [];
+  if (templateSelect) {
+    templateSelect.innerHTML = availableTemplates
+      .map((template) => `<option value="${template.id}">${template.name}</option>`)
+      .join('');
+  }
+}
+
+async function loadSummaryConfig() {
+  const response = await fetch('/v1/summary/config');
+  if (!response.ok) throw new Error(`Failed to load summary config: ${response.status}`);
+  const data = await response.json();
+  if (templateSelect) templateSelect.value = data.template_id || 'meeting_minutes';
+  if (systemPromptInput) systemPromptInput.value = data.system_prompt || '';
+  if (userPromptInput) userPromptInput.value = data.user_prompt || '{{text}}';
+  if (apiUrlInput) apiUrlInput.value = data.api_url || '';
+  if (apiKeyInput) apiKeyInput.value = data.api_key || '';
+  if (modelInput) modelInput.value = data.model || '';
+}
+
+function applyTemplateToInputs(templateId) {
+  const template = availableTemplates.find((item) => item.id === templateId);
+  if (!template) return;
+  if (systemPromptInput) systemPromptInput.value = template.system_prompt || '';
+  if (userPromptInput) userPromptInput.value = template.user_prompt || '{{text}}';
+}
+
+async function saveSummaryConfig() {
+  const payload = {
+    template_id: templateSelect ? templateSelect.value : 'meeting_minutes',
+    system_prompt: systemPromptInput ? systemPromptInput.value : '',
+    user_prompt: userPromptInput ? userPromptInput.value : '{{text}}',
+    api_url: apiUrlInput ? apiUrlInput.value : '',
+    api_key: apiKeyInput ? apiKeyInput.value : '',
+    model: modelInput ? modelInput.value : '',
+  };
+  const response = await fetch('/v1/summary/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(`Failed to save config: ${response.status}`);
+  statusText.textContent = '总结配置已保存';
+}
+
+async function exportJsonl() {
+  const query = currentSessionId ? `?session_id=${encodeURIComponent(currentSessionId)}` : '';
+  const response = await fetch(`/v1/export/jsonl${query}`);
+  if (!response.ok) throw new Error(`Failed to export JSONL: ${response.status}`);
+  const content = await response.text();
+  const blob = new Blob([content], { type: 'application/x-ndjson' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `meeting-record-${currentSessionId || 'all'}.jsonl`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 function setupWebSocket() {
   return new Promise((resolve, reject) => {
     try {
-      websocket = new WebSocket(websocketUrl);
+      const wsUrl = new URL(websocketUrl);
+      if (selectedLanguage && selectedLanguage !== 'auto') {
+        wsUrl.searchParams.set('language', selectedLanguage);
+      }
+      websocket = new WebSocket(wsUrl.toString());
     } catch (error) {
       statusText.textContent = "Invalid WebSocket URL. Please check and try again.";
       reject(error);
@@ -266,7 +360,7 @@ function renderLinesWithBuffer(
   const showTransLag = !isFinalizing && remaining_time_transcription > 0;
   const showDiaLag = !isFinalizing && !!buffer_diarization && remaining_time_diarization > 0;
   const signature = JSON.stringify({
-    lines: (lines || []).map((it) => ({ speaker: it.speaker, text: it.text, start: it.start, end: it.end, detected_language: it.detected_language, summary: it.summary, summary_status: it.summary_status })),
+    lines: (lines || []).map((it) => ({ speaker: it.speaker, text: it.text, start: it.start, end: it.end, detected_language: it.detected_language, summary: it.summary, summary_status: it.summary_status, segment_id: it.segment_id })),
     buffer_transcription: buffer_transcription || "",
     buffer_diarization: buffer_diarization || "",
     buffer_translation: buffer_translation,
@@ -384,7 +478,7 @@ function renderLinesWithBuffer(
         currentLineText += `
             <div class="summary summary-error">
                 <span class="summary-text">Summary unavailable</span>
-                <button class="retry-summary-btn" data-segment-id="${item._summary_id || ''}">Retry</button>
+                <button class="retry-summary-btn" data-segment-id="${item.segment_id || ''}">重试总结</button>
             </div>`;
       }
 
@@ -409,7 +503,7 @@ function renderLinesWithBuffer(
       }
       
       btn.disabled = true;
-      btn.textContent = 'Retrying...';
+        btn.textContent = '重试中...';
       
       try {
         const response = await fetch('/v1/summary/retry', {
@@ -430,12 +524,12 @@ function renderLinesWithBuffer(
         const result = await response.json();
         console.log('Retry queued:', result);
         
-        btn.textContent = 'Queued';
+        btn.textContent = '已加入队列';
       } catch (error) {
         console.error('Failed to retry summary:', error);
         btn.disabled = false;
-        btn.textContent = 'Retry';
-        alert('Failed to retry summary. Please try again.');
+        btn.textContent = '重试总结';
+        alert('总结重试失败，请稍后再试。');
       }
     });
   });
@@ -713,11 +807,39 @@ if (microphoneSelect) {
   microphoneSelect.addEventListener("change", handleMicrophoneChange);
 }
 
+if (languageSelect) {
+  languageSelect.value = selectedLanguage;
+  languageSelect.addEventListener('change', handleLanguageChange);
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   try {
-    await enumerateMicrophones();
+    await Promise.all([enumerateMicrophones(), loadTemplates(), loadSummaryConfig()]);
+    if (templateSelect) {
+      templateSelect.addEventListener('change', () => applyTemplateToInputs(templateSelect.value));
+    }
+    if (saveSummaryConfigButton) {
+      saveSummaryConfigButton.addEventListener('click', async () => {
+        try {
+          await saveSummaryConfig();
+        } catch (error) {
+          console.error(error);
+          statusText.textContent = '保存配置失败';
+        }
+      });
+    }
+    if (exportJsonlButton) {
+      exportJsonlButton.addEventListener('click', async () => {
+        try {
+          await exportJsonl();
+        } catch (error) {
+          console.error(error);
+          statusText.textContent = '导出失败';
+        }
+      });
+    }
   } catch (error) {
-    console.log("Could not enumerate microphones on load:", error);
+    console.log("Initialization failed:", error);
   }
 });
 
