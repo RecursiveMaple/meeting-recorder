@@ -350,7 +350,7 @@ function renderLinesWithBuffer(
   const showTransLag = !isFinalizing && remaining_time_transcription > 0;
   const showDiaLag = !isFinalizing && !!buffer_diarization && remaining_time_diarization > 0;
   const signature = JSON.stringify({
-    lines: (lines || []).map((it) => ({ speaker: it.speaker, text: it.text, start: it.start, end: it.end, detected_language: it.detected_language })),
+    lines: (lines || []).map((it) => ({ speaker: it.speaker, text: it.text, start: it.start, end: it.end, detected_language: it.detected_language, summary: it.summary, summary_status: it.summary_status })),
     buffer_transcription: buffer_transcription || "",
     buffer_diarization: buffer_diarization || "",
     buffer_translation: buffer_translation,
@@ -450,6 +450,27 @@ function renderLinesWithBuffer(
                     ${translationIcon}
                     <span class="translation_text">${translationContent}</span>
                 </div>
+            </div>`;
+      }
+
+      // Add summary display
+      if (item.summary && item.summary_status === "ready") {
+        currentLineText += `
+            <div class="summary">
+                <span class="summary-icon">📝</span>
+                <span class="summary-text">${item.summary}</span>
+            </div>`;
+      } else if (item.summary_status === "processing") {
+        currentLineText += `
+            <div class="summary summary-processing">
+                <span class="spinner-small"></span>
+                <span class="summary-text">Summarizing...</span>
+            </div>`;
+      } else if (item.summary_status === "timeout" || item.summary_status === "error") {
+        currentLineText += `
+            <div class="summary summary-error">
+                <span class="summary-text">Summary unavailable</span>
+                <button class="retry-summary-btn" data-segment-id="${item._summary_id || ''}">Retry</button>
             </div>`;
       }
 
