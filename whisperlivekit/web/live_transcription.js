@@ -45,6 +45,9 @@ const saveSummaryConfigButton = document.getElementById("saveSummaryConfigButton
 const exportJsonlButton = document.getElementById("exportJsonlButton");
 let availableTemplates = [];
 let selectedLanguage = localStorage.getItem('selectedLanguage') || 'zh';
+let activeInputStream = null;
+let activeDisplayStream = null;
+const DESKTOP_AUDIO_VALUE = '__desktop__';
 
 // Auto-detect WebSocket URL from current page
 const host = window.location.hostname || "localhost";
@@ -91,7 +94,7 @@ async function enumerateMicrophones() {
 function populateMicrophoneSelect() {
   if (!microphoneSelect) return;
 
-  microphoneSelect.innerHTML = '<option value="">Default</option>';
+  microphoneSelect.innerHTML = '<option value="">Default</option><option value="__desktop__">桌面声音</option>';
 
   availableMicrophones.forEach((device, index) => {
     const option = document.createElement('option');
@@ -101,7 +104,7 @@ function populateMicrophoneSelect() {
   });
 
   const savedMicId = localStorage.getItem('selectedMicrophone');
-  if (savedMicId && availableMicrophones.some(mic => mic.deviceId === savedMicId)) {
+  if (savedMicId === DESKTOP_AUDIO_VALUE || (savedMicId && availableMicrophones.some(mic => mic.deviceId === savedMicId))) {
     microphoneSelect.value = savedMicId;
     selectedMicrophoneId = savedMicId;
   }
@@ -112,18 +115,63 @@ function handleMicrophoneChange() {
   localStorage.setItem('selectedMicrophone', selectedMicrophoneId || '');
 
   const selectedDevice = availableMicrophones.find(mic => mic.deviceId === selectedMicrophoneId);
-  const deviceName = selectedDevice ? selectedDevice.label : 'Default';
+  const deviceName = selectedMicrophoneId === DESKTOP_AUDIO_VALUE ? '桌面声音' : (selectedDevice ? selectedDevice.label : 'Default');
 
   console.log(`Selected microphone: ${deviceName}`);
 
   if (isRecording) {
-    statusText.textContent = "Switching microphone... Please wait.";
+    statusText.textContent = selectedMicrophoneId === DESKTOP_AUDIO_VALUE
+      ? "切换到桌面声音中，请稍候。"
+      : "Switching microphone... Please wait.";
     stopRecording().then(() => {
       setTimeout(() => {
         toggleRecording();
       }, 1000);
     });
   }
+}
+
+async function getSelectedAudioStream() {
+  if (selectedMicrophoneId === DESKTOP_AUDIO_VALUE) {
+    if (!navigator.mediaDevices.getDisplayMedia) {
+      throw new Error('当前浏览器不支持桌面声音采集');
+    }
+
+    const displayStream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: true,
+    });
+    activeDisplayStream = displayStream;
+
+    const audioTracks = displayStream.getAudioTracks();
+    if (!audioTracks.length) {
+      displayStream.getTracks().forEach((track) => track.stop());
+      activeDisplayStream = null;
+      throw new Error('未获取到桌面音频。请在共享弹窗中勾选“共享音频”。');
+    }
+
+    const desktopAudioStream = new MediaStream(audioTracks);
+    activeInputStream = desktopAudioStream;
+
+    const [videoTrack] = displayStream.getVideoTracks();
+    if (videoTrack) {
+      videoTrack.addEventListener('ended', () => {
+        if (isRecording) {
+          statusText.textContent = '桌面共享已结束。';
+          stopRecording();
+        }
+      }, { once: true });
+    }
+
+    return desktopAudioStream;
+  }
+
+  const audioConstraints = selectedMicrophoneId
+    ? { audio: { deviceId: { exact: selectedMicrophoneId } } }
+    : { audio: true };
+  const stream = await navigator.mediaDevices.getUserMedia(audioConstraints);
+  activeInputStream = stream;
+  return stream;
 }
 
 function handleLanguageChange() {
@@ -599,10 +647,7 @@ async function startRecording() {
       console.log("Error acquiring wake lock.");
     }
 
-    const audioConstraints = selectedMicrophoneId 
-      ? { audio: { deviceId: { exact: selectedMicrophoneId } } }
-      : { audio: true };
-    const stream = await navigator.mediaDevices.getUserMedia(audioConstraints);
+    const stream = await getSelectedAudioStream();
 
     audioContext = new (window.AudioContext || window.webkitAudioContext)();
     analyser = audioContext.createAnalyser();
@@ -668,9 +713,11 @@ async function startRecording() {
   } catch (err) {
     if (window.location.hostname === "0.0.0.0") {
       statusText.textContent =
-        "Error accessing microphone. Browsers may block microphone access on 0.0.0.0. Try using localhost:8000 instead.";
+        "Error accessing audio source. Browsers may block capture on 0.0.0.0. Try using localhost:8000 instead.";
     } else {
-      statusText.textContent = "Error accessing microphone. Please allow microphone access.";
+      statusText.textContent = selectedMicrophoneId === DESKTOP_AUDIO_VALUE
+        ? "Error accessing desktop audio. Please choose a screen/tab and enable audio sharing."
+        : "Error accessing microphone. Please allow microphone access.";
     }
     console.error(err);
   }
@@ -721,6 +768,16 @@ async function stopRecording() {
   if (microphone) {
     microphone.disconnect();
     microphone = null;
+  }
+
+  if (activeInputStream) {
+    activeInputStream.getTracks().forEach((track) => track.stop());
+    activeInputStream = null;
+  }
+
+  if (activeDisplayStream) {
+    activeDisplayStream.getTracks().forEach((track) => track.stop());
+    activeDisplayStream = null;
   }
 
   if (analyser) {
