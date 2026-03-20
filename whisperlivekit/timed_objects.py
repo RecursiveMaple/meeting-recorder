@@ -176,6 +176,7 @@ class Segment(TimedText):
             _dict["detected_language"] = self.detected_language
         if self.summary:
             _dict["summary"] = self.summary
+        if self.segment_id is not None or self.summary_status != "pending":
             _dict["summary_status"] = self.summary_status
         return _dict
 

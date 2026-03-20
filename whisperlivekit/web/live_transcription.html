@@ -45,6 +45,7 @@
                     </select>
                 </div>
 
+                <button id="openSettingsButton" class="secondary-button" type="button">设置</button>
                 <button id="exportJsonlButton" class="secondary-button" type="button">导出 JSONL</button>
             </div>
         </div>
@@ -52,40 +53,46 @@
         <p id="status"></p>
     </div>
 
-    <div class="config-panel">
-        <div class="config-grid">
-            <div class="field field-wide">
-                <label for="templateSelect">模板</label>
-                <select id="templateSelect"></select>
+    <div id="settingsModal" class="modal-backdrop hidden" aria-hidden="true">
+        <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle">
+            <div class="modal-header">
+                <h2 id="settingsModalTitle">总结与 API 设置</h2>
+                <button id="closeSettingsButton" class="secondary-button" type="button">关闭</button>
             </div>
+            <div class="config-grid">
+                <div class="field field-wide">
+                    <label for="templateSelect">模板</label>
+                    <select id="templateSelect"></select>
+                </div>
 
-            <div class="field field-wide">
-                <label for="systemPromptInput">System Prompt</label>
-                <textarea id="systemPromptInput" rows="4" placeholder="输入 system prompt"></textarea>
-            </div>
+                <div class="field field-wide">
+                    <label for="systemPromptInput">System Prompt</label>
+                    <textarea id="systemPromptInput" rows="4" placeholder="输入 system prompt"></textarea>
+                </div>
 
-            <div class="field field-wide">
-                <label for="userPromptInput">User Prompt</label>
-                <textarea id="userPromptInput" rows="4" placeholder="输入 user prompt，支持 {{text}}"></textarea>
-            </div>
+                <div class="field field-wide">
+                    <label for="userPromptInput">User Prompt</label>
+                    <textarea id="userPromptInput" rows="4" placeholder="输入 user prompt，支持 {{text}}"></textarea>
+                </div>
 
-            <div class="field">
-                <label for="apiUrlInput">API URL</label>
-                <input id="apiUrlInput" type="text" placeholder="http://localhost:11434/v1" />
-            </div>
+                <div class="field">
+                    <label for="apiUrlInput">API URL</label>
+                    <input id="apiUrlInput" type="text" placeholder="http://localhost:11434/v1" />
+                </div>
 
-            <div class="field">
-                <label for="apiKeyInput">API Key</label>
-                <input id="apiKeyInput" type="password" placeholder="可留空" />
-            </div>
+                <div class="field">
+                    <label for="apiKeyInput">API Key</label>
+                    <input id="apiKeyInput" type="password" placeholder="可留空" />
+                </div>
 
-            <div class="field">
-                <label for="modelInput">模型名</label>
-                <input id="modelInput" type="text" placeholder="llama3.2" />
+                <div class="field">
+                    <label for="modelInput">模型名</label>
+                    <input id="modelInput" type="text" placeholder="llama3.2" />
+                </div>
             </div>
-        </div>
-        <div class="config-actions">
-            <button id="saveSummaryConfigButton" class="secondary-button" type="button">保存总结配置</button>
+            <div class="config-actions">
+                <button id="saveSummaryConfigButton" class="secondary-button" type="button">保存总结配置</button>
+            </div>
         </div>
     </div>
 

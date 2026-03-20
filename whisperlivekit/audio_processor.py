@@ -649,7 +649,6 @@ class AudioProcessor:
 
     async def results_formatter(self) -> AsyncGenerator[FrontData, None]:
         """Format processing results for output."""
-        prev_lines_count = 0
         while True:
             try:
                 if self._ffmpeg_error:
@@ -673,24 +672,30 @@ class AudioProcessor:
                 if not lines and not buffer_transcription_text and not buffer_diarization_text:
                     response_status = "no_audio_detected"
 
-                # Queue new segments for summarization
-                if self.summary_queue and len(lines) > prev_lines_count:
-                    for i in range(prev_lines_count, len(lines)):
-                        segment = lines[i]
-                        if segment.text and not segment.is_silence():
-                            segment_id = self._queue_segment_for_summary(segment)
-                            # Store segment_id in segment for later lookup
-                            segment._summary_id = segment_id
-                            segment.segment_id = segment_id
-                    prev_lines_count = len(lines)
+                stored_segments = session_store.get_session_segments(self.session_id) if self.session_id else []
+                stored_index = 0
 
-                # Attach summaries to segments
                 for segment in lines:
+                    if not segment.text or segment.is_silence():
+                        continue
+
+                    if stored_index < len(stored_segments):
+                        stored_segment = stored_segments[stored_index]
+                        segment.segment_id = stored_segment.id
+                        segment._summary_id = stored_segment.id
+                        segment.summary = stored_segment.summary
+                        segment.summary_status = stored_segment.summary_status
+                    elif self.summary_queue:
+                        segment_id = self._queue_segment_for_summary(segment)
+                        segment._summary_id = segment_id
+                        segment.segment_id = segment_id
+                        segment.summary_status = self.summary_status.get(segment_id, "pending")
+
                     if hasattr(segment, "_summary_id") and segment._summary_id in self.summary_results:
                         segment.summary = self.summary_results[segment._summary_id]
                         segment.summary_status = self.summary_status.get(segment._summary_id, "pending")
-                    elif hasattr(segment, "_summary_id"):
-                        segment.summary_status = self.summary_status.get(segment._summary_id, "pending")
+
+                    stored_index += 1
 
                 response = FrontData(
                     status=response_status,

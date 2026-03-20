@@ -35,6 +35,9 @@ const linesTranscriptDiv = document.getElementById("linesTranscript");
 const timerElement = document.querySelector(".timer");
 const microphoneSelect = document.getElementById("microphoneSelect");
 const languageSelect = document.getElementById("languageSelect");
+const openSettingsButton = document.getElementById("openSettingsButton");
+const closeSettingsButton = document.getElementById("closeSettingsButton");
+const settingsModal = document.getElementById("settingsModal");
 const templateSelect = document.getElementById("templateSelect");
 const systemPromptInput = document.getElementById("systemPromptInput");
 const userPromptInput = document.getElementById("userPromptInput");
@@ -86,6 +89,18 @@ function clearSummaryDraft() {
   } catch (error) {
     console.warn('Failed to clear summary draft:', error);
   }
+}
+
+function openSettingsModal() {
+  if (!settingsModal) return;
+  settingsModal.classList.remove('hidden');
+  settingsModal.setAttribute('aria-hidden', 'false');
+}
+
+function closeSettingsModal() {
+  if (!settingsModal) return;
+  settingsModal.classList.add('hidden');
+  settingsModal.setAttribute('aria-hidden', 'true');
 }
 
 function resetDesktopAudioWarning() {
@@ -951,6 +966,28 @@ if (languageSelect) {
   languageSelect.addEventListener('change', handleLanguageChange);
 }
 
+if (openSettingsButton) {
+  openSettingsButton.addEventListener('click', openSettingsModal);
+}
+
+if (closeSettingsButton) {
+  closeSettingsButton.addEventListener('click', closeSettingsModal);
+}
+
+if (settingsModal) {
+  settingsModal.addEventListener('click', (event) => {
+    if (event.target === settingsModal) {
+      closeSettingsModal();
+    }
+  });
+}
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    closeSettingsModal();
+  }
+});
+
 document.addEventListener('DOMContentLoaded', async () => {
   try {
     await Promise.all([enumerateMicrophones(), loadTemplates(), loadSummaryConfig()]);
@@ -969,6 +1006,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       saveSummaryConfigButton.addEventListener('click', async () => {
         try {
           await saveSummaryConfig();
+          closeSettingsModal();
         } catch (error) {
           console.error(error);
           statusText.textContent = '保存配置失败';
