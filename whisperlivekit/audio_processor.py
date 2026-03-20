@@ -2,7 +2,7 @@ import asyncio
 import logging
 import traceback
 from time import time
-from typing import Any, AsyncGenerator, List, Optional, Union
+from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Union
 
 import numpy as np
 
@@ -15,15 +15,18 @@ from whisperlivekit.core import (
 from whisperlivekit.ffmpeg_manager import FFmpegManager, FFmpegState
 from whisperlivekit.metrics_collector import SessionMetrics
 from whisperlivekit.silero_vad_iterator import FixedVADIterator, OnnxWrapper, load_jit_vad
-from whisperlivekit.timed_objects import ChangeSpeaker, FrontData, Silence, State
+from whisperlivekit.timed_objects import ChangeSpeaker, FrontData, Segment, Silence, State
 from whisperlivekit.tokens_alignment import TokensAlignment
+from whisperlivekit.summary.llm_client import LLMClient, LLMConfig, DEFAULT_SYSTEM_PROMPTS
+from whisperlivekit.summary.templates import get_template
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-SENTINEL = object() # unique sentinel object for end of stream marker
+SENTINEL = object()  # unique sentinel object for end of stream marker
 MIN_DURATION_REAL_SILENCE = 5
+
 
 async def get_all_from_queue(queue: asyncio.Queue) -> Union[object, Silence, np.ndarray, List[Any]]:
     items: List[Any] = []
@@ -48,8 +51,9 @@ async def get_all_from_queue(queue: asyncio.Queue) -> Union[object, Silence, np.
         queue.task_done()
     if isinstance(items[0], np.ndarray):
         return np.concatenate(items)
-    else: #translation
+    else:  # translation
         return items
+
 
 class AudioProcessor:
     """
@@ -60,10 +64,10 @@ class AudioProcessor:
     def __init__(self, **kwargs: Any) -> None:
         """Initialize the audio processor with configuration, models, and state."""
         # Extract per-session language override before passing to TranscriptionEngine
-        session_language = kwargs.pop('language', None)
+        session_language = kwargs.pop("language", None)
 
-        if 'transcription_engine' in kwargs and isinstance(kwargs['transcription_engine'], TranscriptionEngine):
-            models = kwargs['transcription_engine']
+        if "transcription_engine" in kwargs and isinstance(kwargs["transcription_engine"], TranscriptionEngine):
+            models = kwargs["transcription_engine"]
         else:
             models = TranscriptionEngine(**kwargs)
 
@@ -104,13 +108,12 @@ class AudioProcessor:
         self._ffmpeg_error: Optional[str] = None
 
         if not self.is_pcm_input:
-            self.ffmpeg_manager = FFmpegManager(
-                sample_rate=self.sample_rate,
-                channels=self.channels
-            )
+            self.ffmpeg_manager = FFmpegManager(sample_rate=self.sample_rate, channels=self.channels)
+
             async def handle_ffmpeg_error(error_type: str):
                 logger.error(f"FFmpeg error: {error_type}")
                 self._ffmpeg_error = error_type
+
             self.ffmpeg_manager.on_error_callback = handle_ffmpeg_error
 
         self.transcription_queue: Optional[asyncio.Queue] = asyncio.Queue() if self.args.transcription else None
@@ -137,6 +140,117 @@ class AudioProcessor:
         if models.translation_model:
             self.translation = online_translation_factory(self.args, models.translation_model)
 
+        # Summary processing (LLM-based)
+        self.summary_queue: Optional[asyncio.Queue] = None
+        self.summary_task: Optional[asyncio.Task] = None
+        self.llm_client: Optional[LLMClient] = None
+        self.summary_results: Dict[int, str] = {}  # segment_id -> summary
+        self.summary_status: Dict[int, str] = {}  # segment_id -> status (pending/processing/ready/error/timeout)
+        self._processed_segments: Set[int] = set()  # Track which segments have been queued for summary
+        self._segment_counter: int = 0  # Unique ID for each segment
+
+        if getattr(self.args, "llm_summary_enabled", False):
+            self._init_summary_client()
+
+    def _init_summary_client(self) -> None:
+        """Initialize the LLM client for summarization."""
+        config = LLMConfig(
+            api_url=getattr(self.args, "llm_api_url", "http://localhost:11434/v1"),
+            api_key=getattr(self.args, "llm_api_key", ""),
+            model=getattr(self.args, "llm_model", "llama3.2"),
+            timeout=getattr(self.args, "llm_timeout", 5.0),
+            max_tokens=getattr(self.args, "llm_max_tokens", 100),
+            temperature=getattr(self.args, "llm_temperature", 0.3),
+        )
+        self.llm_client = LLMClient(config)
+        self.summary_queue = asyncio.Queue()
+        logger.info(f"LLM summary client initialized: {config.api_url} / {config.model}")
+
+    async def summary_processor(self) -> None:
+        """Process segments for summarization using LLM."""
+        if not self.llm_client or not self.summary_queue:
+            return
+
+        template_id = getattr(self.args, "summary_template", "meeting_minutes")
+        template = get_template(template_id) or get_template("meeting_minutes")
+        min_tokens = getattr(self.args, "summary_min_tokens", 5)
+
+        while True:
+            try:
+                item = await self.summary_queue.get()
+                if item is SENTINEL:
+                    logger.debug("Summary processor received sentinel. Finishing.")
+                    break
+
+                segment_id, segment_text = item
+
+                # Skip if text is too short
+                word_count = len(segment_text.split())
+                if word_count < min_tokens:
+                    self.summary_status[segment_id] = "skipped"
+                    continue
+
+                self.summary_status[segment_id] = "processing"
+
+                try:
+                    summary = await asyncio.wait_for(
+                        self.llm_client.summarize(
+                            text=segment_text,
+                            system_prompt=template.system_prompt
+                            if template
+                            else DEFAULT_SYSTEM_PROMPTS.get(template_id, DEFAULT_SYSTEM_PROMPTS["general"]),
+                            user_prompt_template=template.user_prompt if template else "{{text}}",
+                        ),
+                        timeout=self.llm_client.config.timeout,
+                    )
+                    self.summary_results[segment_id] = summary
+                    self.summary_status[segment_id] = "ready"
+                    logger.debug(f"Summary ready for segment {segment_id}: {summary[:50]}...")
+
+                except asyncio.TimeoutError:
+                    logger.warning(f"Summary timeout for segment {segment_id}")
+                    self.summary_status[segment_id] = "timeout"
+                except Exception as e:
+                    logger.error(f"Summary error for segment {segment_id}: {e}")
+                    self.summary_status[segment_id] = "error"
+
+            except asyncio.CancelledError:
+                logger.info("Summary processor cancelled.")
+                break
+            except Exception as e:
+                logger.error(f"Exception in summary_processor: {e}")
+                logger.debug(f"Traceback: {traceback.format_exc()}")
+
+        logger.info("Summary processor task finished.")
+
+    def _queue_segment_for_summary(self, segment: Segment) -> int:
+        """Queue a segment for summarization and return its ID."""
+        if not self.summary_queue or not segment.text:
+            return -1
+
+        self._segment_counter += 1
+        segment_id = self._segment_counter
+
+        # Store initial status
+        self.summary_status[segment_id] = "pending"
+
+        # Queue for async processing
+        asyncio.create_task(self.summary_queue.put((segment_id, segment.text)))
+
+        return segment_id
+
+        # Summary processing (LLM-based)
+        self.summary_queue: Optional[asyncio.Queue] = None
+        self.summary_task: Optional[asyncio.Task] = None
+        self.llm_client: Optional[LLMClient] = None
+        self.summary_results: Dict[int, str] = {}  # segment_id -> summary
+        self.summary_status: Dict[int, str] = {}  # segment_id -> status (pending/processing/ready/error/timeout)
+        self._processed_segments: Set[int] = set()  # Track which segments have been queued for summary
+        self._segment_counter: int = 0  # Unique ID for each segment
+
+        if getattr(self.args, "llm_summary_enabled", False):
+            self._init_summary_client()
+
     async def _push_silence_event(self) -> None:
         if self.transcription_queue:
             await self.transcription_queue.put(self.current_silence)
@@ -153,9 +267,7 @@ class AudioProcessor:
             audio_t = at_sample / self.sample_rate
         else:
             audio_t = self.total_pcm_samples / self.sample_rate if self.sample_rate else 0.0
-        self.current_silence = Silence(
-            is_starting=True, start=audio_t
-        )
+        self.current_silence = Silence(is_starting=True, start=audio_t)
         # Push a separate start-only event so _end_silence won't mutate it
         start_event = Silence(is_starting=True, start=audio_t)
         if self.transcription_queue:
@@ -193,7 +305,9 @@ class AudioProcessor:
         if self.args.diarization and self.diarization_queue:
             await self.diarization_queue.put(pcm_chunk.copy())
 
-    def _slice_before_silence(self, pcm_array: np.ndarray, chunk_sample_start: int, silence_sample: Optional[int]) -> Optional[np.ndarray]:
+    def _slice_before_silence(
+        self, pcm_array: np.ndarray, chunk_sample_start: int, silence_sample: Optional[int]
+    ) -> Optional[np.ndarray]:
         if silence_sample is None:
             return None
         relative_index = int(silence_sample - chunk_sample_start)
@@ -282,7 +396,7 @@ class AudioProcessor:
         if not self.transcription:
             return
         try:
-            if hasattr(self.transcription, 'finish'):
+            if hasattr(self.transcription, "finish"):
                 final_tokens, end_time = await asyncio.to_thread(self.transcription.finish)
             else:
                 # SimulStreamingOnlineProcessor uses start_silence() → process_iter(is_last=True)
@@ -334,9 +448,13 @@ class AudioProcessor:
                     await self._finish_transcription()
                     break
 
-                asr_internal_buffer_duration_s = len(getattr(self.transcription, 'audio_buffer', [])) / self.transcription.SAMPLING_RATE
+                asr_internal_buffer_duration_s = (
+                    len(getattr(self.transcription, "audio_buffer", [])) / self.transcription.SAMPLING_RATE
+                )
                 transcription_lag_s = max(0.0, time() - self.beg_loop - self.state.end_buffer)
-                asr_processing_logs = f"internal_buffer={asr_internal_buffer_duration_s:.2f}s | lag={transcription_lag_s:.2f}s |"
+                asr_processing_logs = (
+                    f"internal_buffer={asr_internal_buffer_duration_s:.2f}s | lag={transcription_lag_s:.2f}s |"
+                )
                 stream_time_end_of_current_pcm = cumulative_pcm_duration_stream_time
                 new_tokens = []
                 current_audio_processed_upto = self.state.end_buffer
@@ -351,7 +469,9 @@ class AudioProcessor:
                         asr_processing_logs += f" + Silence of = {item.duration:.2f}s"
                         cumulative_pcm_duration_stream_time += item.duration
                         current_audio_processed_upto = cumulative_pcm_duration_stream_time
-                        self.transcription.end_silence(item.duration, self.state.tokens[-1].end if self.state.tokens else 0)
+                        self.transcription.end_silence(
+                            item.duration, self.state.tokens[-1].end if self.state.tokens else 0
+                        )
                     if self.state.tokens:
                         asr_processing_logs += f" | last_end = {self.state.tokens[-1].end} |"
                     logger.info(asr_processing_logs)
@@ -380,7 +500,7 @@ class AudioProcessor:
                 if new_tokens:
                     validated_text = self.sep.join([t.text for t in new_tokens])
                     if buffer_text.startswith(validated_text):
-                        _buffer_transcript.text = buffer_text[len(validated_text):].lstrip()
+                        _buffer_transcript.text = buffer_text[len(validated_text) :].lstrip()
 
                 candidate_end_times = [self.state.end_buffer]
 
@@ -405,7 +525,7 @@ class AudioProcessor:
             except Exception as e:
                 logger.warning(f"Exception in transcription_processor: {e}")
                 logger.warning(f"Traceback: {traceback.format_exc()}")
-                if 'pcm_array' in locals() and pcm_array is not SENTINEL : # Check if pcm_array was assigned from queue
+                if "pcm_array" in locals() and pcm_array is not SENTINEL:  # Check if pcm_array was assigned from queue
                     self.transcription_queue.task_done()
 
         if self.is_stopping:
@@ -416,7 +536,6 @@ class AudioProcessor:
                 await self.translation_queue.put(SENTINEL)
 
         logger.info("Transcription processor task finished.")
-
 
     async def diarization_processor(self) -> None:
         while True:
@@ -478,6 +597,7 @@ class AudioProcessor:
 
     async def results_formatter(self) -> AsyncGenerator[FrontData, None]:
         """Format processing results for output."""
+        prev_lines_count = 0
         while True:
             try:
                 if self._ffmpeg_error:
@@ -495,11 +615,29 @@ class AudioProcessor:
                 )
                 state = await self.get_current_state()
 
-                buffer_transcription_text = state.buffer_transcription.text if state.buffer_transcription else ''
+                buffer_transcription_text = state.buffer_transcription.text if state.buffer_transcription else ""
 
                 response_status = "active_transcription"
                 if not lines and not buffer_transcription_text and not buffer_diarization_text:
                     response_status = "no_audio_detected"
+
+                # Queue new segments for summarization
+                if self.summary_queue and len(lines) > prev_lines_count:
+                    for i in range(prev_lines_count, len(lines)):
+                        segment = lines[i]
+                        if segment.text and not segment.is_silence():
+                            segment_id = self._queue_segment_for_summary(segment)
+                            # Store segment_id in segment for later lookup
+                            segment._summary_id = segment_id
+                    prev_lines_count = len(lines)
+
+                # Attach summaries to segments
+                for segment in lines:
+                    if hasattr(segment, "_summary_id") and segment._summary_id in self.summary_results:
+                        segment.summary = self.summary_results[segment._summary_id]
+                        segment.summary_status = self.summary_status.get(segment._summary_id, "pending")
+                    elif hasattr(segment, "_summary_id"):
+                        segment.summary_status = self.summary_status.get(segment._summary_id, "pending")
 
                 response = FrontData(
                     status=response_status,
@@ -508,17 +646,21 @@ class AudioProcessor:
                     buffer_diarization=buffer_diarization_text,
                     buffer_translation=buffer_translation_text,
                     remaining_time_transcription=state.remaining_time_transcription,
-                    remaining_time_diarization=state.remaining_time_diarization if self.args.diarization else 0
+                    remaining_time_diarization=state.remaining_time_diarization if self.args.diarization else 0,
+                    summary_enabled=getattr(self.args, "llm_summary_enabled", False),
+                    summary_template=getattr(self.args, "summary_template", "meeting_minutes"),
                 )
 
-                should_push = (response != self.last_response_content)
+                should_push = response != self.last_response_content
                 if should_push:
                     self.metrics.n_responses_sent += 1
                     yield response
                     self.last_response_content = response
 
                 if self.is_stopping and self._processing_tasks_done():
-                    logger.info("Results formatter: All upstream processors are done and in stopping state. Terminating.")
+                    logger.info(
+                        "Results formatter: All upstream processors are done and in stopping state. Terminating."
+                    )
                     return
 
                 await asyncio.sleep(0.05)
@@ -537,11 +679,12 @@ class AudioProcessor:
             success = await self.ffmpeg_manager.start()
             if not success:
                 logger.error("Failed to start FFmpeg manager")
+
                 async def error_generator() -> AsyncGenerator[FrontData, None]:
                     yield FrontData(
-                        status="error",
-                        error="FFmpeg failed to start. Please check that FFmpeg is installed."
+                        status="error", error="FFmpeg failed to start. Please check that FFmpeg is installed."
                     )
+
                 return error_generator()
             self.ffmpeg_reader_task = asyncio.create_task(self.ffmpeg_stdout_reader())
             self.all_tasks_for_cleanup.append(self.ffmpeg_reader_task)
@@ -561,6 +704,12 @@ class AudioProcessor:
             self.translation_task = asyncio.create_task(self.translation_processor())
             self.all_tasks_for_cleanup.append(self.translation_task)
             processing_tasks_for_watchdog.append(self.translation_task)
+
+        # Summary processor (LLM-based)
+        if self.summary_queue and self.llm_client:
+            self.summary_task = asyncio.create_task(self.summary_processor())
+            self.all_tasks_for_cleanup.append(self.summary_task)
+            # Don't add to watchdog - summary is optional and can timeout
 
         # Monitor overall system health
         self.watchdog_task = asyncio.create_task(self.watchdog(processing_tasks_for_watchdog))
@@ -582,7 +731,7 @@ class AudioProcessor:
                 for i, task in enumerate(list(tasks_remaining)):
                     if task.done():
                         exc = task.exception()
-                        task_name = task.get_name() if hasattr(task, 'get_name') else f"Monitored Task {i}"
+                        task_name = task.get_name() if hasattr(task, "get_name") else f"Monitored Task {i}"
                         if exc:
                             logger.error(f"{task_name} unexpectedly completed with exception: {exc}")
                         else:
@@ -599,6 +748,11 @@ class AudioProcessor:
         """Clean up resources when processing is complete."""
         logger.info("Starting cleanup of AudioProcessor resources.")
         self.is_stopping = True
+
+        # Signal summary processor to stop
+        if self.summary_queue:
+            await self.summary_queue.put(SENTINEL)
+
         for task in self.all_tasks_for_cleanup:
             if task and not task.done():
                 task.cancel()
@@ -607,6 +761,10 @@ class AudioProcessor:
         if created_tasks:
             await asyncio.gather(*created_tasks, return_exceptions=True)
         logger.info("All processing tasks cancelled or finished.")
+
+        # Close LLM client
+        if self.llm_client:
+            await self.llm_client.close()
 
         if not self.is_pcm_input and self.ffmpeg_manager:
             try:
@@ -629,9 +787,9 @@ class AudioProcessor:
             self.diarization_task,
             self.translation_task,
             self.ffmpeg_reader_task,
+            self.summary_task,
         ]
         return all(task.done() for task in tasks_to_check if task)
-
 
     async def process_audio(self, message: Optional[bytes]) -> None:
         """Process incoming audio data."""
@@ -716,9 +874,7 @@ class AudioProcessor:
                 await self._end_silence(at_sample=res.get("start"))
 
             if "end" in res and not self.current_silence:
-                pre_silence_chunk = self._slice_before_silence(
-                    pcm_array, chunk_sample_start, res.get("end")
-                )
+                pre_silence_chunk = self._slice_before_silence(pcm_array, chunk_sample_start, res.get("end"))
                 if pre_silence_chunk is not None and pre_silence_chunk.size > 0:
                     await self._enqueue_active_audio(pre_silence_chunk)
                 await self._begin_silence(at_sample=res.get("end"))
@@ -747,4 +903,6 @@ class AudioProcessor:
 
         await self._enqueue_active_audio(pcm_array)
         self.total_pcm_samples += len(pcm_array)
-        logger.info(f"Flushed remaining PCM buffer: {len(pcm_array)} samples ({len(pcm_array)/self.sample_rate:.2f}s)")
+        logger.info(
+            f"Flushed remaining PCM buffer: {len(pcm_array)} samples ({len(pcm_array) / self.sample_rate:.2f}s)"
+        )
