@@ -1,4 +1,5 @@
 """Typed configuration for the WhisperLiveKit pipeline."""
+
 import logging
 from dataclasses import dataclass, fields
 from typing import Optional
@@ -75,6 +76,17 @@ class WhisperLiveKitConfig:
     # vLLM Realtime backend
     vllm_url: str = "ws://localhost:8000/v1/realtime"
     vllm_model: str = ""
+
+    # LLM Summary (for meeting recorder)
+    llm_summary_enabled: bool = False
+    llm_api_url: str = "http://localhost:11434/v1"
+    llm_api_key: str = ""
+    llm_model: str = "llama3.2"
+    llm_timeout: float = 5.0
+    llm_max_tokens: int = 100
+    llm_temperature: float = 0.3
+    summary_template: str = "meeting_minutes"  # Default template ID
+    summary_min_tokens: int = 5  # Min tokens before summarizing
 
     def __post_init__(self):
         # .en model suffix forces English
