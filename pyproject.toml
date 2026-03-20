@@ -22,7 +22,6 @@ classifiers = [
 ]
 dependencies = [
     "fastapi",
-    "python-multipart",
     "librosa",
     "soundfile",
     "uvicorn",
