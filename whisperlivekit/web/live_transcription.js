@@ -48,6 +48,43 @@ let selectedLanguage = localStorage.getItem('selectedLanguage') || 'zh';
 let activeInputStream = null;
 let activeDisplayStream = null;
 const DESKTOP_AUDIO_VALUE = '__desktop__';
+const SUMMARY_DRAFT_STORAGE_KEY = 'summaryConfigDraft';
+
+function loadSummaryDraft() {
+  try {
+    const raw = localStorage.getItem(SUMMARY_DRAFT_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (error) {
+    console.warn('Failed to load summary draft:', error);
+    return null;
+  }
+}
+
+function saveSummaryDraft() {
+  try {
+    localStorage.setItem(
+      SUMMARY_DRAFT_STORAGE_KEY,
+      JSON.stringify({
+        template_id: templateSelect ? templateSelect.value : 'meeting_minutes',
+        system_prompt: systemPromptInput ? systemPromptInput.value : '',
+        user_prompt: userPromptInput ? userPromptInput.value : '{{text}}',
+        api_url: apiUrlInput ? apiUrlInput.value : '',
+        api_key: apiKeyInput ? apiKeyInput.value : '',
+        model: modelInput ? modelInput.value : '',
+      })
+    );
+  } catch (error) {
+    console.warn('Failed to save summary draft:', error);
+  }
+}
+
+function clearSummaryDraft() {
+  try {
+    localStorage.removeItem(SUMMARY_DRAFT_STORAGE_KEY);
+  } catch (error) {
+    console.warn('Failed to clear summary draft:', error);
+  }
+}
 
 // Auto-detect WebSocket URL from current page
 const host = window.location.hostname || "localhost";
@@ -147,7 +184,7 @@ async function getSelectedAudioStream() {
     if (!audioTracks.length) {
       displayStream.getTracks().forEach((track) => track.stop());
       activeDisplayStream = null;
-      throw new Error('未获取到桌面音频。请在共享弹窗中勾选“共享音频”。');
+      throw new Error('未获取到桌面音频。请重新选择“桌面声音”，在浏览器弹窗中选中要共享的屏幕/标签页，并勾选“共享音频”或“Share system audio”后再确认。Chrome/Edge 通常支持最好。');
     }
 
     const desktopAudioStream = new MediaStream(audioTracks);
@@ -210,12 +247,14 @@ async function loadSummaryConfig() {
   const response = await fetch('/v1/summary/config');
   if (!response.ok) throw new Error(`Failed to load summary config: ${response.status}`);
   const data = await response.json();
-  if (templateSelect) templateSelect.value = data.template_id || 'meeting_minutes';
-  if (systemPromptInput) systemPromptInput.value = data.system_prompt || '';
-  if (userPromptInput) userPromptInput.value = data.user_prompt || '{{text}}';
-  if (apiUrlInput) apiUrlInput.value = data.api_url || '';
-  if (apiKeyInput) apiKeyInput.value = data.api_key || '';
-  if (modelInput) modelInput.value = data.model || '';
+  const draft = loadSummaryDraft();
+  const effective = draft || data;
+  if (templateSelect) templateSelect.value = effective.template_id || 'meeting_minutes';
+  if (systemPromptInput) systemPromptInput.value = effective.system_prompt || '';
+  if (userPromptInput) userPromptInput.value = effective.user_prompt || '{{text}}';
+  if (apiUrlInput) apiUrlInput.value = effective.api_url || '';
+  if (apiKeyInput) apiKeyInput.value = effective.api_key || '';
+  if (modelInput) modelInput.value = effective.model || '';
 }
 
 function applyTemplateToInputs(templateId) {
@@ -223,6 +262,7 @@ function applyTemplateToInputs(templateId) {
   if (!template) return;
   if (systemPromptInput) systemPromptInput.value = template.system_prompt || '';
   if (userPromptInput) userPromptInput.value = template.user_prompt || '{{text}}';
+  saveSummaryDraft();
 }
 
 async function saveSummaryConfig() {
@@ -240,6 +280,7 @@ async function saveSummaryConfig() {
     body: JSON.stringify(payload),
   });
   if (!response.ok) throw new Error(`Failed to save config: ${response.status}`);
+  clearSummaryDraft();
   statusText.textContent = '总结配置已保存';
 }
 
@@ -716,7 +757,7 @@ async function startRecording() {
         "Error accessing audio source. Browsers may block capture on 0.0.0.0. Try using localhost:8000 instead.";
     } else {
       statusText.textContent = selectedMicrophoneId === DESKTOP_AUDIO_VALUE
-        ? "Error accessing desktop audio. Please choose a screen/tab and enable audio sharing."
+        ? (err && err.message ? err.message : "Error accessing desktop audio. Please choose a screen/tab and enable audio sharing.")
         : "Error accessing microphone. Please allow microphone access.";
     }
     console.error(err);
@@ -872,8 +913,16 @@ if (languageSelect) {
 document.addEventListener('DOMContentLoaded', async () => {
   try {
     await Promise.all([enumerateMicrophones(), loadTemplates(), loadSummaryConfig()]);
+    [systemPromptInput, userPromptInput, apiUrlInput, apiKeyInput, modelInput].forEach((el) => {
+      if (el) {
+        el.addEventListener('input', saveSummaryDraft);
+      }
+    });
     if (templateSelect) {
-      templateSelect.addEventListener('change', () => applyTemplateToInputs(templateSelect.value));
+      templateSelect.addEventListener('change', () => {
+        applyTemplateToInputs(templateSelect.value);
+        saveSummaryDraft();
+      });
     }
     if (saveSummaryConfigButton) {
       saveSummaryConfigButton.addEventListener('click', async () => {

@@ -1,6 +1,8 @@
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
@@ -19,6 +21,8 @@ logging.getLogger("whisperlivekit.qwen3_asr").setLevel(logging.DEBUG)
 
 config = parse_args()
 transcription_engine = None
+SUMMARY_CONFIG_DIR = Path.home() / ".config" / "wlk"
+SUMMARY_CONFIG_PATH = SUMMARY_CONFIG_DIR / "summary_config.json"
 summary_runtime_config: Dict[str, str] = {
     "template_id": getattr(config, "summary_template", "meeting_minutes"),
     "system_prompt": getattr(config, "summary_system_prompt", "") or "",
@@ -27,6 +31,30 @@ summary_runtime_config: Dict[str, str] = {
     "api_key": getattr(config, "llm_api_key", ""),
     "model": getattr(config, "llm_model", "llama3.2"),
 }
+
+
+def _load_persisted_summary_config() -> Dict[str, str]:
+    if not SUMMARY_CONFIG_PATH.exists():
+        return {}
+    try:
+        with open(SUMMARY_CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {k: v for k, v in data.items() if isinstance(v, str)}
+    except Exception as e:
+        logger.warning(f"Failed to load persisted summary config: {e}")
+        return {}
+
+
+def _persist_summary_config() -> None:
+    try:
+        SUMMARY_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(SUMMARY_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(summary_runtime_config, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to persist summary config: {e}")
+
+
+summary_runtime_config.update(_load_persisted_summary_config())
 
 
 @asynccontextmanager
@@ -458,6 +486,7 @@ async def save_summary_config(payload: dict = Body(...)):
     config.llm_api_key = summary_runtime_config["api_key"]
     config.llm_model = summary_runtime_config["model"]
     config.llm_summary_enabled = True
+    _persist_summary_config()
 
     for session in session_store.get_all_sessions():
         session.summary_template = template_id
