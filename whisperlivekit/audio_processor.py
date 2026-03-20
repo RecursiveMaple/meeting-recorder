@@ -168,8 +168,29 @@ class AudioProcessor:
             temperature=getattr(self.args, "llm_temperature", 0.3),
         )
         self.llm_client = LLMClient(config)
-        self.summary_queue = asyncio.Queue()
+        if self.summary_queue is None:
+            self.summary_queue = asyncio.Queue()
         logger.info(f"LLM summary client initialized: {config.api_url} / {config.model}")
+
+    def _ensure_summary_runtime_started(self) -> None:
+        """Ensure summary client, queue, and background task are running for active sessions."""
+        if not getattr(self.args, "llm_summary_enabled", False):
+            return
+
+        if self.llm_client is None or self.summary_queue is None:
+            self._init_summary_client()
+
+        if self.summary_task is None or self.summary_task.done():
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                logger.debug("No running event loop yet; summary task will start during create_tasks().")
+                return
+
+            self.summary_task = loop.create_task(self.summary_processor())
+            if self.summary_task not in self.all_tasks_for_cleanup:
+                self.all_tasks_for_cleanup.append(self.summary_task)
+            logger.info("Summary processor task started for active session.")
 
     def update_summary_runtime_config(
         self,
@@ -193,7 +214,7 @@ class AudioProcessor:
         if user_prompt is not None:
             self.args.summary_user_prompt = user_prompt
         if getattr(self.args, "llm_summary_enabled", False):
-            self._init_summary_client()
+            self._ensure_summary_runtime_started()
 
     async def summary_processor(self) -> None:
         """Process segments for summarization using LLM."""
