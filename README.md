@@ -12,13 +12,59 @@
 
 ## 安装
 
+### 前置要求
+
+- Python 3.11-3.13
+- FFmpeg（音频处理）
+
 ```bash
-# 克隆仓库
+# Ubuntu/Debian
+sudo apt install ffmpeg
+
+# macOS
+brew install ffmpeg
+
+# Windows
+# 从 https://ffmpeg.org/download.html 下载并添加到 PATH
+```
+
+### 安装步骤
+
+```bash
+# 1. 克隆仓库
 git clone https://github.com/RecursiveMaple/meeting-recorder.git
 cd meeting-recorder
 
-# 安装依赖
+# 2. 创建虚拟环境
+python -m venv venv
+source venv/bin/activate  # Linux/macOS
+# 或 venv\Scripts\activate  # Windows
+
+# 3. 安装基础依赖
 pip install -e .
+
+# 4. 安装说话人分离依赖（可选但推荐）
+pip install -e ".[diarization-sortformer]"
+
+# 或者使用更强但更旧的 diart 后端
+# pip install -e ".[diarization-diart]"
+```
+
+### CPU 环境（无 GPU）
+
+```bash
+# 安装 CPU 版本的 PyTorch
+pip install -e ".[cpu]"
+```
+
+### 验证安装
+
+```bash
+# 检查是否安装成功
+wlk --help
+
+# 如果提示找不到命令，尝试：
+python -m whisperlivekit.cli --help
 ```
 
 ## 快速开始
@@ -192,6 +238,52 @@ wlk serve --diarization --llm-summary-enabled \
   --llm-api-url https://api.deepseek.com/v1 \
   --llm-api-key sk-xxx \
   --llm-model deepseek-chat
+```
+
+## 故障排除
+
+### 常见问题
+
+**1. `ModuleNotFoundError: No module named 'whisperlivekit'`**
+```bash
+# 确保在虚拟环境中安装
+pip install -e .
+```
+
+**2. `ModuleNotFoundError: No module named 'torch'`**
+```bash
+# 安装 PyTorch
+pip install torch torchaudio
+# 或使用 CPU 版本
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+```
+
+**3. `ModuleNotFoundError: No module named 'nemo'`（说话人分离）**
+```bash
+# 安装 NeMo 工具包
+pip install -e ".[diarization-sortformer]"
+```
+
+**4. `ffmpeg not found`**
+```bash
+# 安装 FFmpeg（见前置要求）
+```
+
+**5. `wlk: command not found`**
+```bash
+# 使用 Python 模块方式运行
+python -m whisperlivekit.cli serve --diarization
+```
+
+### 清洁环境测试
+
+```bash
+# 创建全新虚拟环境测试
+python -m venv test_env
+source test_env/bin/activate
+pip install -e .
+pip install -e ".[diarization-sortformer]"
+wlk serve --diarization
 ```
 
 ## 开发
